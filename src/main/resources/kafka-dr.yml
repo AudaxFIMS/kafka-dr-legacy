@@ -1,43 +1,40 @@
 kafka-dr:
-  # ─── Base Kafka client properties (applied to ALL clients: producers, consumers, AdminClients) ──
-  # SSL/SASL/timeouts configured here propagate everywhere, including health checks and probes.
-  default-environment:
-    spring.cloud.stream.kafka.binder:
-      auto-create-topics: false
-      replication-factor: 1
-      configuration:
-        reconnect.backoff.ms: 1000
-        reconnect.backoff.max.ms: 10000
-        request.timeout.ms: 5000
-        default.api.timeout.ms: 10000
-        socket.connection.setup.timeout.ms: 3000
-        socket.connection.setup.timeout.max.ms: 5000
-        schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
-        # ── SSL example (uncomment for SSL-enabled clusters) ──
-        # security.protocol: SSL
-        # ssl.truststore.location: ${SSL_TRUSTSTORE_LOCATION:/certs/truststore.p12}
-        # ssl.truststore.password: ${SSL_TRUSTSTORE_PASSWORD:changeit}
-        # ssl.truststore.type: PKCS12
-        # ssl.keystore.location: ${SSL_KEYSTORE_LOCATION:/certs/keystore.p12}
-        # ssl.keystore.password: ${SSL_KEYSTORE_PASSWORD:changeit}
-        # ssl.keystore.type: PKCS12
-        # ssl.key.password: ${SSL_KEY_PASSWORD:changeit}
-        # ── SASL example (uncomment for SASL-enabled clusters) ──
-        # security.protocol: SASL_SSL
-        # sasl.mechanism: PLAIN
-        # sasl.jaas.config: >-
-        #   org.apache.kafka.common.security.plain.PlainLoginModule required
-        #   username="${KAFKA_USERNAME:admin}"
-        #   password="${KAFKA_PASSWORD:admin-secret}";
+  # ─── Base Kafka client properties ──────────────────────────────────────────
+  # Applied to ALL Kafka clients: producers, consumers, AdminClients (health checks, probes).
+  # SSL, SASL, timeouts, Schema Registry — configure once, used everywhere.
+  default-properties:
+    configuration:
+      reconnect.backoff.ms: 1000
+      reconnect.backoff.max.ms: 10000
+      request.timeout.ms: 5000
+      default.api.timeout.ms: 10000
+      socket.connection.setup.timeout.ms: 3000
+      socket.connection.setup.timeout.max.ms: 5000
+      schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+      # ── SSL (uncomment for SSL-enabled clusters) ──
+      # security.protocol: SSL
+      # ssl.truststore.location: ${SSL_TRUSTSTORE_LOCATION:/certs/truststore.p12}
+      # ssl.truststore.password: ${SSL_TRUSTSTORE_PASSWORD:changeit}
+      # ssl.truststore.type: PKCS12
+      # ssl.keystore.location: ${SSL_KEYSTORE_LOCATION:/certs/keystore.p12}
+      # ssl.keystore.password: ${SSL_KEYSTORE_PASSWORD:changeit}
+      # ssl.key.password: ${SSL_KEY_PASSWORD:changeit}
+      # ── SASL (uncomment for SASL-enabled clusters) ──
+      # security.protocol: SASL_SSL
+      # sasl.mechanism: PLAIN
+      # sasl.jaas.config: >-
+      #   org.apache.kafka.common.security.plain.PlainLoginModule required
+      #   username="${KAFKA_USERNAME:admin}"
+      #   password="${KAFKA_PASSWORD:admin-secret}";
 
   auto-create-topics: true
 
-  # ─── Default consumer properties (applied to all consumers, overridden by per-topic properties) ──
+  # ─── Default consumer properties (merged on top of default-properties) ─────
   default-consumer-properties:
     configuration:
       max.poll.records: 500
 
-  # ─── Default producer properties (applied to all producers, overridden by per-topic properties) ──
+  # ─── Default producer properties (merged on top of default-properties) ─────
   default-producer-properties:
     sync: true
     configuration:
@@ -46,7 +43,7 @@ kafka-dr:
       delivery.timeout.ms: 10000
       request.timeout.ms: 5000
 
-  # ─── Clusters (each with optional per-cluster property overrides) ──
+  # ─── Clusters ─────────────────────────────────────────────────────────────
   clusters:
     primary:
       bootstrap-servers: ${KAFKA_PRIMARY_BROKERS:localhost:9092}
@@ -62,6 +59,7 @@ kafka-dr:
       bootstrap-servers: ${KAFKA_TERTIARY_BROKERS:localhost:9096}
       priority: 3
 
+  # ─── Consumers ─────────────────────────────────────────────────────────────
   consumers:
     - topic: demo-events
       group: dr-demo-group
@@ -87,6 +85,7 @@ kafka-dr:
       handler: processRawData
       content-type: bytes
 
+  # ─── Producers ─────────────────────────────────────────────────────────────
   producers:
     - topic: demo-events
       content-type: string
@@ -103,15 +102,18 @@ kafka-dr:
     - topic: raw-telemetry
       content-type: bytes
 
+  # ─── Health check ──────────────────────────────────────────────────────────
   health-check:
     interval-ms: 5000
     timeout-ms: 3000
     failure-threshold: 3
     recovery-threshold: 3
 
+  # ─── Late initializer ─────────────────────────────────────────────────────
   late-initializer:
     timeout-ms: 3000
 
+  # ─── Idempotency ──────────────────────────────────────────────────────────
   idempotency:
     ttl-seconds: 3600
     key-prefix: idempotency

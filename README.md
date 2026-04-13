@@ -46,7 +46,7 @@ No Spring Boot, no Spring Cloud Stream -- plain Java 11 with the Kafka client li
 - **Multi-format support** -- String, JSON, Avro, and raw bytes payloads with per-topic configuration
 - **Type-safe handlers** -- `MessageHandler<T>` with automatic generic type resolution via reflection
 - **REST API** -- built-in endpoints for status monitoring and test message production
-- **Schema Registry multi-broker** -- SR configured with all cluster brokers, survives any single cluster failure
+- **Schema Registry** -- shared SR instance for Avro/Protobuf schema management across all clusters
 - **Fully dynamic configuration** -- clusters, consumers, and producers defined in YAML; no code changes needed
 
 ## Project Structure
@@ -195,23 +195,24 @@ kafka-dr:
       priority: 2
 ```
 
-### Default Environment
+### Default Properties
 
-Applied to all consumers and producers as base Kafka client properties:
+Base Kafka client properties applied to all clients (producers, consumers, AdminClients). SSL, SASL, timeouts, Schema Registry -- configure once, used everywhere:
 
 ```yaml
 kafka-dr:
-  default-environment:
-    spring.cloud.stream.kafka.binder:
-      configuration:
-        reconnect.backoff.ms: 1000
-        request.timeout.ms: 5000
-        schema.registry.url: http://localhost:8081
+  default-properties:
+    configuration:
+      reconnect.backoff.ms: 1000
+      request.timeout.ms: 5000
+      schema.registry.url: http://localhost:8081
+      security.protocol: SSL
+      ssl.truststore.location: /certs/truststore.p12
 ```
 
 ### Consumers
 
-Each consumer defines a topic, consumer group, handler method name, and content type. Per-consumer `properties.configuration` overrides default environment properties.
+Each consumer defines a topic, consumer group, handler method name, and content type. Per-consumer `properties.configuration` overrides default properties.
 
 ```yaml
 kafka-dr:
@@ -447,7 +448,7 @@ Built-in HTTP server on port 8088 (configurable via `REST_PORT` env var or `-Dre
 | Reflection-based type resolution | Handlers declare `MessageHandler<T>` once; `HandlerTypeResolver` extracts `T` automatically -- no boilerplate |
 | Non-blocking startup | Cluster probing with timeout ensures app starts even if all brokers are down |
 | AdminClient for health checks | `describeCluster().clusterId()` is lightweight and tests actual broker connectivity |
-| Schema Registry multi-broker | SR connects to all three clusters, remains available when any single cluster fails |
+| SR on single cluster | Independent clusters have separate `CLUSTER_ID`s; SR's `_schemas` topic lives on one cluster. All producers/consumers share the same SR endpoint via `schema.registry.url` |
 | In-memory idempotency | Sufficient for single-instance; replace `InMemoryIdempotencyStore` with Redis/DB implementation for multi-instance |
 | JDK HttpServer for REST | Zero-dependency HTTP server built into Java -- fits "legacy" philosophy |
 
@@ -469,7 +470,7 @@ Built-in HTTP server on port 8088 (configurable via `REST_PORT` env var or `-Dre
 | `kafka-primary` | 9092 | KRaft broker, priority 1 |
 | `kafka-secondary` | 9094 | KRaft broker, priority 2 |
 | `kafka-tertiary` | 9096 | KRaft broker, priority 3 |
-| `schema-registry` | 8081 | Confluent Schema Registry (multi-broker) |
+| `schema-registry` | 8081 | Confluent Schema Registry |
 | `kafka-ui` | 8080 | Web UI for monitoring all clusters |
 
 All Kafka brokers run in KRaft mode (no ZooKeeper).

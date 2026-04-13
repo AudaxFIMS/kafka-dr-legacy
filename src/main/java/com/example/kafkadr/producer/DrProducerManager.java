@@ -208,7 +208,7 @@ public class DrProducerManager implements ClusterSwitchListener {
     }
 
     private Properties buildProducerProperties(ClusterInfo cluster, ProducerConfig producerConfig) {
-        // Resolve full property chain: default-env -> per-cluster -> default-producer -> per-topic
+        // Resolve full property chain: default-properties -> per-cluster -> default-producer -> per-topic
         Properties props = KafkaPropertyResolver.resolveProducerProperties(
                 config, cluster.getName(), producerConfig);
 

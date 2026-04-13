@@ -28,7 +28,7 @@ public class ClusterConfig {
     /**
      * Per-cluster Kafka client property overrides.
      * Keys under {@code configuration:} are applied directly to Kafka client Properties.
-     * Overrides values from {@code default-environment}.
+     * Overrides values from {@code default-properties}.
      *
      * <pre>
      * clusters:

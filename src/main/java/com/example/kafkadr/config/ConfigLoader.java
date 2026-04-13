@@ -100,8 +100,8 @@ public class ConfigLoader {
     private static KafkaDrConfig mapToConfig(Map<String, Object> map) {
         KafkaDrConfig config = new KafkaDrConfig();
 
-        if (map.containsKey("default-environment")) {
-            config.setDefaultEnvironment((Map<String, Object>) map.get("default-environment"));
+        if (map.containsKey("default-properties")) {
+            config.setDefaultProperties((Map<String, Object>) map.get("default-properties"));
         }
 
         if (map.containsKey("auto-create-topics")) {

@@ -30,7 +30,7 @@ public final class KafkaAdminHelper {
 
     /**
      * Probe a cluster to check if it's reachable.
-     * Applies SSL/SASL properties from default-environment + per-cluster overrides.
+     * Applies SSL/SASL properties from default-properties + per-cluster overrides.
      */
     public static boolean probeCluster(String bootstrapServers, long timeoutMs,
                                        KafkaDrConfig config, String clusterName) {
@@ -85,7 +85,7 @@ public final class KafkaAdminHelper {
 
     /**
      * Create a configured AdminClient for health checking.
-     * Includes SSL/SASL properties from default-environment + per-cluster overrides.
+     * Includes SSL/SASL properties from default-properties + per-cluster overrides.
      */
     public static AdminClient createAdminClient(String bootstrapServers, long timeoutMs,
                                                 KafkaDrConfig config, String clusterName) {
@@ -94,7 +94,7 @@ public final class KafkaAdminHelper {
 
     /**
      * Build AdminClient properties with the full config chain:
-     * default-environment -> per-cluster overrides -> admin-specific timeouts.
+     * default-properties -> per-cluster overrides -> admin-specific timeouts.
      */
     private static Properties buildAdminProperties(String bootstrapServers, long timeoutMs,
                                                    KafkaDrConfig config, String clusterName) {

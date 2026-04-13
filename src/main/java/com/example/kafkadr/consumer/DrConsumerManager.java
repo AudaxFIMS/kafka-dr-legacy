@@ -108,7 +108,7 @@ public class DrConsumerManager implements ClusterSwitchListener {
     }
 
     private Properties buildConsumerProperties(ClusterInfo cluster, ConsumerConfig consumerConfig) {
-        // Resolve full property chain: default-env -> per-cluster -> default-consumer -> per-topic
+        // Resolve full property chain: default-properties -> per-cluster -> default-consumer -> per-topic
         Properties props = KafkaPropertyResolver.resolveConsumerProperties(
                 config, cluster.getName(), consumerConfig);
 

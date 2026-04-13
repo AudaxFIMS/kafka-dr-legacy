@@ -9,7 +9,7 @@ import java.util.Map;
  */
 public class KafkaDrConfig {
 
-    private Map<String, Object> defaultEnvironment = new LinkedHashMap<>();
+    private Map<String, Object> defaultProperties = new LinkedHashMap<>();
     private boolean autoCreateTopics;
     private Map<String, Object> defaultConsumerProperties = new LinkedHashMap<>();
     private Map<String, Object> defaultProducerProperties = new LinkedHashMap<>();
@@ -20,12 +20,12 @@ public class KafkaDrConfig {
     private LateInitializerConfig lateInitializer = new LateInitializerConfig();
     private IdempotencyConfig idempotency = new IdempotencyConfig();
 
-    public Map<String, Object> getDefaultEnvironment() {
-        return defaultEnvironment;
+    public Map<String, Object> getDefaultProperties() {
+        return defaultProperties;
     }
 
-    public void setDefaultEnvironment(Map<String, Object> defaultEnvironment) {
-        this.defaultEnvironment = defaultEnvironment;
+    public void setDefaultProperties(Map<String, Object> defaultProperties) {
+        this.defaultProperties = defaultProperties;
     }
 
     public boolean isAutoCreateTopics() {

@@ -3,7 +3,7 @@ version: "3.8"
 services:
   # ─── PRIMARY CLUSTER (priority 1) ──────────────────────────────
   kafka-primary:
-    image: confluentinc/cp-kafka:7.6.0
+    image: confluentinc/cp-kafka:latest
     hostname: kafka-primary
     container_name: kafka-primary
     ports:
@@ -28,7 +28,7 @@ services:
 
   # ─── SECONDARY CLUSTER (priority 2) ────────────────────────────
   kafka-secondary:
-    image: confluentinc/cp-kafka:7.6.0
+    image: confluentinc/cp-kafka:latest
     hostname: kafka-secondary
     container_name: kafka-secondary
     ports:
@@ -53,7 +53,7 @@ services:
 
   # ─── TERTIARY CLUSTER (priority 3) ─────────────────────────────
   kafka-tertiary:
-    image: confluentinc/cp-kafka:7.6.0
+    image: confluentinc/cp-kafka:latest
     hostname: kafka-tertiary
     container_name: kafka-tertiary
     ports:
@@ -76,21 +76,23 @@ services:
     volumes:
       - kafka-tertiary-data:/var/lib/kafka/data
 
-  # ─── SCHEMA REGISTRY (multi-broker: survives any single cluster failure) ──
+  # ─── SCHEMA REGISTRY ────────────────────────────────────────────
+  # SR stores schemas in a single Kafka cluster (_schemas topic).
+  # Since our clusters are independent (different CLUSTER_IDs),
+  # SR must connect to exactly one cluster for its internal storage.
+  # All three clusters' producers/consumers share this one SR endpoint.
   schema-registry:
-    image: confluentinc/cp-schema-registry:7.6.0
+    image: confluentinc/cp-schema-registry:latest
     hostname: schema-registry
     container_name: schema-registry
     ports:
       - "8081:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka-primary:29092,kafka-secondary:29092,kafka-tertiary:29092
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka-primary:29092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
     depends_on:
       - kafka-primary
-      - kafka-secondary
-      - kafka-tertiary
 
   # ─── KAFKA UI (optional, for debugging) ────────────────────────
   kafka-ui:

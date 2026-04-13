@@ -9,15 +9,14 @@ import java.util.Properties;
  * <p>Builds a {@link Properties} object by merging configuration layers in order
  * (each layer overrides the previous):
  * <ol>
- *   <li>{@code default-environment.spring.cloud.stream.kafka.binder.configuration} — base (SSL, timeouts, etc.)</li>
+ *   <li>{@code default-properties.configuration} — base (SSL, SASL, timeouts, Schema Registry)</li>
  *   <li>Per-cluster {@code properties.configuration} — cluster-specific overrides</li>
- *   <li>Per-consumer/producer {@code default-*-properties.configuration} — role defaults</li>
+ *   <li>{@code default-consumer/producer-properties.configuration} — role-specific defaults</li>
  *   <li>Per-topic {@code properties.configuration} — topic-specific overrides</li>
  * </ol>
  *
- * <p>This ensures that SSL, SASL, and any standard Kafka client properties propagate
- * consistently to <b>all</b> Kafka clients: producers, consumers, AdminClients (health checks,
- * probes, topic provisioning).
+ * <p>All keys under {@code configuration:} are standard Kafka client property names
+ * (e.g. {@code security.protocol}, {@code ssl.truststore.location}, {@code acks}).
  */
 public final class KafkaPropertyResolver {
 
@@ -25,14 +24,14 @@ public final class KafkaPropertyResolver {
     }
 
     /**
-     * Build base properties from default-environment + per-cluster overrides.
-     * Suitable for AdminClient (health checks, probes, topic provisioning).
+     * Build base properties from default-properties + per-cluster overrides.
+     * Used for AdminClient (health checks, probes, topic provisioning).
      */
     public static Properties resolveBaseProperties(KafkaDrConfig config, String clusterName) {
         Properties props = new Properties();
 
-        // Layer 1: default-environment
-        applyDefaultEnvironment(props, config);
+        // Layer 1: default-properties
+        applyConfiguration(props, config.getDefaultProperties());
 
         // Layer 2: per-cluster overrides
         if (clusterName != null) {
@@ -84,21 +83,6 @@ public final class KafkaPropertyResolver {
     // ─── internal ───────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")
-    private static void applyDefaultEnvironment(Properties props, KafkaDrConfig config) {
-        Map<String, Object> defaultEnv = config.getDefaultEnvironment();
-        if (defaultEnv == null) return;
-
-        Object binder = getNestedValue(defaultEnv, "spring.cloud.stream.kafka.binder");
-        if (!(binder instanceof Map)) return;
-
-        Map<String, Object> binderMap = (Map<String, Object>) binder;
-        Object configuration = binderMap.get("configuration");
-        if (configuration instanceof Map) {
-            ((Map<String, Object>) configuration).forEach((k, v) -> props.put(k, String.valueOf(v)));
-        }
-    }
-
-    @SuppressWarnings("unchecked")
     private static void applyConfiguration(Properties props, Map<String, Object> propertiesMap) {
         if (propertiesMap == null) return;
 
@@ -106,19 +90,5 @@ public final class KafkaPropertyResolver {
         if (configuration instanceof Map) {
             ((Map<String, Object>) configuration).forEach((k, v) -> props.put(k, String.valueOf(v)));
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Object getNestedValue(Map<String, Object> map, String dottedKey) {
-        String[] keys = dottedKey.split("\\.");
-        Object current = map;
-        for (String key : keys) {
-            if (current instanceof Map) {
-                current = ((Map<String, Object>) current).get(key);
-            } else {
-                return null;
-            }
-        }
-        return current;
     }
 }
