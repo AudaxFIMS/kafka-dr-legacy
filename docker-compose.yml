@@ -1,0 +1,118 @@
+version: "3.8"
+
+services:
+  # ─── PRIMARY CLUSTER (priority 1) ──────────────────────────────
+  kafka-primary:
+    image: confluentinc/cp-kafka:7.6.0
+    hostname: kafka-primary
+    container_name: kafka-primary
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-primary:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-primary:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "primary-cluster-id-0001"
+    volumes:
+      - kafka-primary-data:/var/lib/kafka/data
+
+  # ─── SECONDARY CLUSTER (priority 2) ────────────────────────────
+  kafka-secondary:
+    image: confluentinc/cp-kafka:7.6.0
+    hostname: kafka-secondary
+    container_name: kafka-secondary
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-secondary:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-secondary:29092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "secondary-cluster-id-002"
+    volumes:
+      - kafka-secondary-data:/var/lib/kafka/data
+
+  # ─── TERTIARY CLUSTER (priority 3) ─────────────────────────────
+  kafka-tertiary:
+    image: confluentinc/cp-kafka:7.6.0
+    hostname: kafka-tertiary
+    container_name: kafka-tertiary
+    ports:
+      - "9096:9096"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-tertiary:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:9096
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-tertiary:29092,EXTERNAL://localhost:9096
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "tertiary-cluster-id-003"
+    volumes:
+      - kafka-tertiary-data:/var/lib/kafka/data
+
+  # ─── SCHEMA REGISTRY (multi-broker: survives any single cluster failure) ──
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.0
+    hostname: schema-registry
+    container_name: schema-registry
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka-primary:29092,kafka-secondary:29092,kafka-tertiary:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    depends_on:
+      - kafka-primary
+      - kafka-secondary
+      - kafka-tertiary
+
+  # ─── KAFKA UI (optional, for debugging) ────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: primary
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-primary:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_1_NAME: secondary
+      KAFKA_CLUSTERS_1_BOOTSTRAPSERVERS: kafka-secondary:29092
+      KAFKA_CLUSTERS_2_NAME: tertiary
+      KAFKA_CLUSTERS_2_BOOTSTRAPSERVERS: kafka-tertiary:29092
+    depends_on:
+      - kafka-primary
+      - kafka-secondary
+      - kafka-tertiary
+      - schema-registry
+
+volumes:
+  kafka-primary-data:
+  kafka-secondary-data:
+  kafka-tertiary-data:
