@@ -4,6 +4,7 @@ import com.example.kafkadr.cluster.ClusterInfo;
 import com.example.kafkadr.cluster.ClusterManager;
 import com.example.kafkadr.cluster.ClusterSwitchListener;
 import com.example.kafkadr.config.KafkaDrConfig;
+import com.example.kafkadr.config.KafkaPropertyResolver;
 import com.example.kafkadr.config.ProducerConfig;
 import com.example.kafkadr.serialization.ContentType;
 import com.example.kafkadr.serialization.MessageSerializer;
@@ -206,9 +207,12 @@ public class DrProducerManager implements ClusterSwitchListener {
         producers.clear();
     }
 
-    @SuppressWarnings("unchecked")
     private Properties buildProducerProperties(ClusterInfo cluster, ProducerConfig producerConfig) {
-        Properties props = new Properties();
+        // Resolve full property chain: default-env -> per-cluster -> default-producer -> per-topic
+        Properties props = KafkaPropertyResolver.resolveProducerProperties(
+                config, cluster.getName(), producerConfig);
+
+        // Producer-specific fixed settings
         props.put(org.apache.kafka.clients.producer.ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
                 cluster.getBootstrapServers());
 
@@ -228,48 +232,7 @@ public class DrProducerManager implements ClusterSwitchListener {
                     "org.apache.kafka.common.serialization.StringSerializer");
         }
 
-        // Apply default environment configuration
-        Map<String, Object> defaultEnv = config.getDefaultEnvironment();
-        if (defaultEnv != null) {
-            Map<String, Object> binderConfig = (Map<String, Object>) getNestedValue(defaultEnv,
-                    "spring.cloud.stream.kafka.binder", "configuration");
-            if (binderConfig != null) {
-                binderConfig.forEach((k, v) -> props.put(k, String.valueOf(v)));
-            }
-        }
-
-        // Apply default producer properties
-        Map<String, Object> defaultProducerProps = config.getDefaultProducerProperties();
-        if (defaultProducerProps != null) {
-            Map<String, Object> configuration = (Map<String, Object>) defaultProducerProps.get("configuration");
-            if (configuration != null) {
-                configuration.forEach((k, v) -> props.put(k, String.valueOf(v)));
-            }
-        }
-
-        // Apply producer-specific properties (overrides)
-        Map<String, Object> producerProps = producerConfig.getProperties();
-        if (producerProps != null) {
-            Map<String, Object> configuration = (Map<String, Object>) producerProps.get("configuration");
-            if (configuration != null) {
-                configuration.forEach((k, v) -> props.put(k, String.valueOf(v)));
-            }
-        }
-
         return props;
-    }
-
-    @SuppressWarnings("unchecked")
-    private Object getNestedValue(Map<String, Object> map, String... keys) {
-        Object current = map;
-        for (String key : keys) {
-            if (current instanceof Map) {
-                current = ((Map<String, Object>) current).get(key);
-            } else {
-                return null;
-            }
-        }
-        return current;
     }
 
     private boolean isSyncMode() {

@@ -3,6 +3,7 @@ package com.example.kafkadr.health;
 import com.example.kafkadr.cluster.ClusterInfo;
 import com.example.kafkadr.cluster.ClusterManager;
 import com.example.kafkadr.config.HealthCheckConfig;
+import com.example.kafkadr.config.KafkaDrConfig;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.DescribeClusterResult;
 import org.slf4j.Logger;
@@ -17,19 +18,21 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Periodically checks health of all configured Kafka clusters using AdminClient.
- * Reports results to ClusterManager which handles failover/failback decisions.
+ * AdminClients inherit SSL/SASL properties from the config chain.
  */
 public class ClusterHealthChecker {
 
     private static final Logger log = LoggerFactory.getLogger(ClusterHealthChecker.class);
 
     private final ClusterManager clusterManager;
-    private final HealthCheckConfig config;
+    private final HealthCheckConfig healthConfig;
+    private final KafkaDrConfig config;
     private final ScheduledExecutorService scheduler;
     private final Map<String, AdminClient> adminClients = new HashMap<>();
 
-    public ClusterHealthChecker(ClusterManager clusterManager, HealthCheckConfig config) {
+    public ClusterHealthChecker(ClusterManager clusterManager, KafkaDrConfig config) {
         this.clusterManager = clusterManager;
+        this.healthConfig = config.getHealthCheck();
         this.config = config;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "kafka-health-checker");
@@ -40,15 +43,17 @@ public class ClusterHealthChecker {
 
     public void start() {
         log.info("Starting health checker: interval={}ms, timeout={}ms, failureThreshold={}, recoveryThreshold={}",
-                config.getIntervalMs(), config.getTimeoutMs(),
-                config.getFailureThreshold(), config.getRecoveryThreshold());
+                healthConfig.getIntervalMs(), healthConfig.getTimeoutMs(),
+                healthConfig.getFailureThreshold(), healthConfig.getRecoveryThreshold());
 
         for (ClusterInfo cluster : clusterManager.getAllClusters()) {
             adminClients.put(cluster.getName(),
-                    KafkaAdminHelper.createAdminClient(cluster.getBootstrapServers(), config.getTimeoutMs()));
+                    KafkaAdminHelper.createAdminClient(
+                            cluster.getBootstrapServers(), healthConfig.getTimeoutMs(),
+                            config, cluster.getName()));
         }
 
-        scheduler.scheduleWithFixedDelay(this::checkAllClusters, 0, config.getIntervalMs(), TimeUnit.MILLISECONDS);
+        scheduler.scheduleWithFixedDelay(this::checkAllClusters, 0, healthConfig.getIntervalMs(), TimeUnit.MILLISECONDS);
     }
 
     public void stop() {
@@ -84,20 +89,21 @@ public class ClusterHealthChecker {
 
         try {
             DescribeClusterResult result = adminClient.describeCluster();
-            result.clusterId().get(config.getTimeoutMs(), TimeUnit.MILLISECONDS);
+            result.clusterId().get(healthConfig.getTimeoutMs(), TimeUnit.MILLISECONDS);
             log.trace("Health check OK for cluster '{}'", cluster.getName());
             clusterManager.reportHealthy(cluster.getName());
         } catch (Exception e) {
             log.debug("Health check FAILED for cluster '{}': {}", cluster.getName(), e.getMessage());
             clusterManager.reportUnhealthy(cluster.getName());
 
-            // Recreate admin client on failure to avoid stale connections
             try {
                 adminClient.close(Duration.ofSeconds(1));
             } catch (Exception ignored) {
             }
             adminClients.put(cluster.getName(),
-                    KafkaAdminHelper.createAdminClient(cluster.getBootstrapServers(), config.getTimeoutMs()));
+                    KafkaAdminHelper.createAdminClient(
+                            cluster.getBootstrapServers(), healthConfig.getTimeoutMs(),
+                            config, cluster.getName()));
         }
     }
 }

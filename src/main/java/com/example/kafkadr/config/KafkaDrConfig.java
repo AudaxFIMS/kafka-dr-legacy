@@ -11,6 +11,7 @@ public class KafkaDrConfig {
 
     private Map<String, Object> defaultEnvironment = new LinkedHashMap<>();
     private boolean autoCreateTopics;
+    private Map<String, Object> defaultConsumerProperties = new LinkedHashMap<>();
     private Map<String, Object> defaultProducerProperties = new LinkedHashMap<>();
     private Map<String, ClusterConfig> clusters = new LinkedHashMap<>();
     private List<ConsumerConfig> consumers;
@@ -33,6 +34,14 @@ public class KafkaDrConfig {
 
     public void setAutoCreateTopics(boolean autoCreateTopics) {
         this.autoCreateTopics = autoCreateTopics;
+    }
+
+    public Map<String, Object> getDefaultConsumerProperties() {
+        return defaultConsumerProperties;
+    }
+
+    public void setDefaultConsumerProperties(Map<String, Object> defaultConsumerProperties) {
+        this.defaultConsumerProperties = defaultConsumerProperties;
     }
 
     public Map<String, Object> getDefaultProducerProperties() {

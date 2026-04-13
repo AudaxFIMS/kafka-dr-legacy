@@ -4,6 +4,7 @@ import com.example.kafkadr.cluster.ClusterInfo;
 import com.example.kafkadr.cluster.ClusterSwitchListener;
 import com.example.kafkadr.config.ConsumerConfig;
 import com.example.kafkadr.config.KafkaDrConfig;
+import com.example.kafkadr.config.KafkaPropertyResolver;
 import com.example.kafkadr.handler.MessageEnvelope;
 import com.example.kafkadr.handler.MessageHandler;
 import com.example.kafkadr.handler.MessageHandlerRegistry;
@@ -106,9 +107,12 @@ public class DrConsumerManager implements ClusterSwitchListener {
         log.info("All consumers stopped");
     }
 
-    @SuppressWarnings("unchecked")
     private Properties buildConsumerProperties(ClusterInfo cluster, ConsumerConfig consumerConfig) {
-        Properties props = new Properties();
+        // Resolve full property chain: default-env -> per-cluster -> default-consumer -> per-topic
+        Properties props = KafkaPropertyResolver.resolveConsumerProperties(
+                config, cluster.getName(), consumerConfig);
+
+        // Consumer-specific fixed settings
         props.put(org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
                 cluster.getBootstrapServers());
         props.put(org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG,
@@ -128,39 +132,7 @@ public class DrConsumerManager implements ClusterSwitchListener {
                     "org.apache.kafka.common.serialization.StringDeserializer");
         }
 
-        // Apply default environment configuration
-        Map<String, Object> defaultEnv = config.getDefaultEnvironment();
-        if (defaultEnv != null) {
-            Map<String, Object> binderConfig = (Map<String, Object>) getNestedValue(defaultEnv,
-                    "spring.cloud.stream.kafka.binder", "configuration");
-            if (binderConfig != null) {
-                binderConfig.forEach((k, v) -> props.put(k, String.valueOf(v)));
-            }
-        }
-
-        // Apply consumer-specific properties (overrides)
-        Map<String, Object> consumerProps = consumerConfig.getProperties();
-        if (consumerProps != null) {
-            Map<String, Object> configuration = (Map<String, Object>) consumerProps.get("configuration");
-            if (configuration != null) {
-                configuration.forEach((k, v) -> props.put(k, String.valueOf(v)));
-            }
-        }
-
         return props;
-    }
-
-    @SuppressWarnings("unchecked")
-    private Object getNestedValue(Map<String, Object> map, String... keys) {
-        Object current = map;
-        for (String key : keys) {
-            if (current instanceof Map) {
-                current = ((Map<String, Object>) current).get(key);
-            } else {
-                return null;
-            }
-        }
-        return current;
     }
 
     /**

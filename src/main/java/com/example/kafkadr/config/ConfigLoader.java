@@ -108,6 +108,10 @@ public class ConfigLoader {
             config.setAutoCreateTopics(Boolean.TRUE.equals(map.get("auto-create-topics")));
         }
 
+        if (map.containsKey("default-consumer-properties")) {
+            config.setDefaultConsumerProperties((Map<String, Object>) map.get("default-consumer-properties"));
+        }
+
         if (map.containsKey("default-producer-properties")) {
             config.setDefaultProducerProperties((Map<String, Object>) map.get("default-producer-properties"));
         }
@@ -121,6 +125,9 @@ public class ConfigLoader {
                 ClusterConfig cc = new ClusterConfig();
                 cc.setBootstrapServers(String.valueOf(clusterMap.get("bootstrap-servers")));
                 cc.setPriority(((Number) clusterMap.get("priority")).intValue());
+                if (clusterMap.containsKey("properties")) {
+                    cc.setProperties((Map<String, Object>) clusterMap.get("properties"));
+                }
                 clusters.put(entry.getKey(), cc);
             }
             config.setClusters(clusters);

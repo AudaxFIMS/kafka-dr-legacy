@@ -1,4 +1,6 @@
 kafka-dr:
+  # ─── Base Kafka client properties (applied to ALL clients: producers, consumers, AdminClients) ──
+  # SSL/SASL/timeouts configured here propagate everywhere, including health checks and probes.
   default-environment:
     spring.cloud.stream.kafka.binder:
       auto-create-topics: false
@@ -11,9 +13,31 @@ kafka-dr:
         socket.connection.setup.timeout.ms: 3000
         socket.connection.setup.timeout.max.ms: 5000
         schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+        # ── SSL example (uncomment for SSL-enabled clusters) ──
+        # security.protocol: SSL
+        # ssl.truststore.location: ${SSL_TRUSTSTORE_LOCATION:/certs/truststore.p12}
+        # ssl.truststore.password: ${SSL_TRUSTSTORE_PASSWORD:changeit}
+        # ssl.truststore.type: PKCS12
+        # ssl.keystore.location: ${SSL_KEYSTORE_LOCATION:/certs/keystore.p12}
+        # ssl.keystore.password: ${SSL_KEYSTORE_PASSWORD:changeit}
+        # ssl.keystore.type: PKCS12
+        # ssl.key.password: ${SSL_KEY_PASSWORD:changeit}
+        # ── SASL example (uncomment for SASL-enabled clusters) ──
+        # security.protocol: SASL_SSL
+        # sasl.mechanism: PLAIN
+        # sasl.jaas.config: >-
+        #   org.apache.kafka.common.security.plain.PlainLoginModule required
+        #   username="${KAFKA_USERNAME:admin}"
+        #   password="${KAFKA_PASSWORD:admin-secret}";
 
   auto-create-topics: true
 
+  # ─── Default consumer properties (applied to all consumers, overridden by per-topic properties) ──
+  default-consumer-properties:
+    configuration:
+      max.poll.records: 500
+
+  # ─── Default producer properties (applied to all producers, overridden by per-topic properties) ──
   default-producer-properties:
     sync: true
     configuration:
@@ -22,10 +46,15 @@ kafka-dr:
       delivery.timeout.ms: 10000
       request.timeout.ms: 5000
 
+  # ─── Clusters (each with optional per-cluster property overrides) ──
   clusters:
     primary:
       bootstrap-servers: ${KAFKA_PRIMARY_BROKERS:localhost:9092}
       priority: 1
+      # Per-cluster overrides (e.g., different SSL certs per region):
+      # properties:
+      #   configuration:
+      #     ssl.truststore.location: /certs/us-east-truststore.p12
     secondary:
       bootstrap-servers: ${KAFKA_SECONDARY_BROKERS:localhost:9094}
       priority: 2

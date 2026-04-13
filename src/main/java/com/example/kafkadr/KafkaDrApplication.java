@@ -84,7 +84,7 @@ public class KafkaDrApplication {
         clusterManager.addListener(producerManager);
 
         // 5. Start health checker — first healthy cluster gets instant election
-        healthChecker = new ClusterHealthChecker(clusterManager, config.getHealthCheck());
+        healthChecker = new ClusterHealthChecker(clusterManager, config);
         healthChecker.start();
 
         // 6. Start late binding initializer for unreachable clusters
@@ -128,7 +128,7 @@ public class KafkaDrApplication {
             String brokers = entry.getValue().getBootstrapServers();
 
             log.info("Probing cluster '{}' ({})...", name, brokers);
-            if (KafkaAdminHelper.probeCluster(brokers, timeoutMs)) {
+            if (KafkaAdminHelper.probeCluster(brokers, timeoutMs, config, name)) {
                 reachable.add(name);
                 log.info("Cluster '{}' is REACHABLE", name);
             } else {

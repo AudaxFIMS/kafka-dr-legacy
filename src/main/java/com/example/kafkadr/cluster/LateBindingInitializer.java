@@ -85,7 +85,7 @@ public class LateBindingInitializer {
 
             String brokers = entry.getValue().getBootstrapServers();
 
-            if (!KafkaAdminHelper.probeCluster(brokers, probeTimeoutMs)) {
+            if (!KafkaAdminHelper.probeCluster(brokers, probeTimeoutMs, config, clusterName)) {
                 continue;
             }
 

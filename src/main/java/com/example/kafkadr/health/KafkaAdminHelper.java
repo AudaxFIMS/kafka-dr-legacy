@@ -1,6 +1,7 @@
 package com.example.kafkadr.health;
 
 import com.example.kafkadr.config.KafkaDrConfig;
+import com.example.kafkadr.config.KafkaPropertyResolver;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -8,7 +9,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
@@ -16,7 +16,10 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Shared AdminClient utilities: cluster probing and topic provisioning.
- * Used by ClusterHealthChecker, LateBindingInitializer, and startup logic.
+ *
+ * <p>All methods apply the full property chain (SSL, SASL, etc.) from config
+ * via {@link KafkaPropertyResolver}, ensuring that AdminClient connections
+ * work identically to producer/consumer connections.
  */
 public final class KafkaAdminHelper {
 
@@ -27,18 +30,11 @@ public final class KafkaAdminHelper {
 
     /**
      * Probe a cluster to check if it's reachable.
-     *
-     * @param bootstrapServers the broker addresses
-     * @param timeoutMs        probe timeout in milliseconds
-     * @return true if the cluster responded within timeout
+     * Applies SSL/SASL properties from default-environment + per-cluster overrides.
      */
-    public static boolean probeCluster(String bootstrapServers, long timeoutMs) {
-        Properties props = new Properties();
-        props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, (int) timeoutMs);
-        props.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, (int) timeoutMs);
-        props.put(AdminClientConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG, String.valueOf(timeoutMs));
-        props.put(AdminClientConfig.RETRIES_CONFIG, 0);
+    public static boolean probeCluster(String bootstrapServers, long timeoutMs,
+                                       KafkaDrConfig config, String clusterName) {
+        Properties props = buildAdminProperties(bootstrapServers, timeoutMs, config, clusterName);
 
         try (AdminClient admin = AdminClient.create(props)) {
             admin.describeCluster().clusterId().get(timeoutMs, TimeUnit.MILLISECONDS);
@@ -50,22 +46,17 @@ public final class KafkaAdminHelper {
 
     /**
      * Provision topics on a cluster if auto-create-topics is enabled.
-     * Creates topics from both consumer and producer configs.
      */
     public static void provisionTopics(String clusterName, String bootstrapServers,
                                        KafkaDrConfig config, long timeoutMs) {
         if (!config.isAutoCreateTopics()) return;
 
-        Properties props = new Properties();
-        props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, (int) timeoutMs);
-        props.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, (int) timeoutMs);
+        Properties props = buildAdminProperties(bootstrapServers, timeoutMs, config, clusterName);
 
         try (AdminClient admin = AdminClient.create(props)) {
             Set<String> existingTopics = admin.listTopics().names().get(timeoutMs, TimeUnit.MILLISECONDS);
             List<NewTopic> toCreate = new ArrayList<>();
 
-            // Collect topics from consumers
             if (config.getConsumers() != null) {
                 for (var cc : config.getConsumers()) {
                     if (!existingTopics.contains(cc.getTopic())) {
@@ -73,7 +64,6 @@ public final class KafkaAdminHelper {
                     }
                 }
             }
-            // Collect topics from producers
             if (config.getProducers() != null) {
                 for (var pc : config.getProducers()) {
                     if (!existingTopics.contains(pc.getTopic()) &&
@@ -95,14 +85,29 @@ public final class KafkaAdminHelper {
 
     /**
      * Create a configured AdminClient for health checking.
+     * Includes SSL/SASL properties from default-environment + per-cluster overrides.
      */
-    public static AdminClient createAdminClient(String bootstrapServers, long timeoutMs) {
-        Properties props = new Properties();
+    public static AdminClient createAdminClient(String bootstrapServers, long timeoutMs,
+                                                KafkaDrConfig config, String clusterName) {
+        return AdminClient.create(buildAdminProperties(bootstrapServers, timeoutMs, config, clusterName));
+    }
+
+    /**
+     * Build AdminClient properties with the full config chain:
+     * default-environment -> per-cluster overrides -> admin-specific timeouts.
+     */
+    private static Properties buildAdminProperties(String bootstrapServers, long timeoutMs,
+                                                   KafkaDrConfig config, String clusterName) {
+        // Start from the shared property chain (SSL, SASL, schema.registry, etc.)
+        Properties props = KafkaPropertyResolver.resolveBaseProperties(config, clusterName);
+
+        // AdminClient-specific settings (override any conflicting values)
         props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, (int) timeoutMs);
         props.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, (int) timeoutMs);
         props.put(AdminClientConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG, String.valueOf(timeoutMs));
         props.put(AdminClientConfig.RETRIES_CONFIG, 0);
-        return AdminClient.create(props);
+
+        return props;
     }
 }
