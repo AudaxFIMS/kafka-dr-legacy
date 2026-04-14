@@ -178,19 +178,21 @@ public class DrConsumerManager implements ClusterSwitchListener {
 
                         String keyPrefix = config.getIdempotency().getKeyPrefix();
                         records.forEach(record -> {
-                            String msgKey = record.key() != null ? record.key().toString() : "";
-                            String idempotencyKey = keyPrefix + ":" + record.topic() + ":" + msgKey;
-
-                            if (idempotencyStore.isDuplicate(idempotencyKey)) {
-                                log.debug("Skipping duplicate: topic={}, partition={}, offset={}",
-                                        record.topic(), record.partition(), record.offset());
-                                return;
-                            }
-
                             try {
+                                // Deserialize key first — needed for idempotency key
                                 Object key = MessageDeserializer.deserialize(
                                         record.key(), keyContentType, types.getKeyType(),
                                         record.topic(), record.partition(), record.offset());
+
+                                String msgKey = key != null ? key.toString() : "";
+                                String idempotencyKey = keyPrefix + ":" + record.topic() + ":" + msgKey;
+
+                                if (idempotencyStore.isDuplicate(idempotencyKey)) {
+                                    log.debug("Skipping duplicate: topic={}, partition={}, offset={}, key={}",
+                                            record.topic(), record.partition(), record.offset(), msgKey);
+                                    return;
+                                }
+
                                 Object value = MessageDeserializer.deserialize(
                                         record.value(), valueContentType, types.getValueType(),
                                         record.topic(), record.partition(), record.offset());
