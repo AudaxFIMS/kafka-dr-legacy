@@ -2,94 +2,98 @@ package com.example.kafkadr.handler;
 
 import com.example.kafkadr.avro.PaymentEvent;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class HandlerTypeResolverTest {
 
-    // --- direct implementations ---
-
-    static class StringHandler implements MessageHandler<String> {
-        @Override
-        public void handle(MessageEnvelope<String> message) {}
+    static class StringStringHandler implements MessageHandler<String, String> {
+        @Override public void handle(ConsumerRecord<String, String> record) {}
     }
 
-    static class JsonNodeHandler implements MessageHandler<JsonNode> {
-        @Override
-        public void handle(MessageEnvelope<JsonNode> message) {}
+    static class StringJsonHandler implements MessageHandler<String, JsonNode> {
+        @Override public void handle(ConsumerRecord<String, JsonNode> record) {}
     }
 
-    static class ByteArrayHandler implements MessageHandler<byte[]> {
-        @Override
-        public void handle(MessageEnvelope<byte[]> message) {}
+    static class LongBytesHandler implements MessageHandler<Long, byte[]> {
+        @Override public void handle(ConsumerRecord<Long, byte[]> record) {}
     }
 
-    static class ObjectHandler implements MessageHandler<Object> {
-        @Override
-        public void handle(MessageEnvelope<Object> message) {}
+    static class StringObjectHandler implements MessageHandler<String, Object> {
+        @Override public void handle(ConsumerRecord<String, Object> record) {}
     }
 
-    static class MapHandler implements MessageHandler<Map<String, Object>> {
-        @Override
-        public void handle(MessageEnvelope<Map<String, Object>> message) {}
-    }
+    static abstract class BaseHandler<K, V> implements MessageHandler<K, V> {}
 
-    // --- via abstract base class ---
-
-    static abstract class BaseHandler<T> implements MessageHandler<T> {}
-
-    static class ExtendedStringHandler extends BaseHandler<String> {
-        @Override
-        public void handle(MessageEnvelope<String> message) {}
+    static class ExtendedHandler extends BaseHandler<String, JsonNode> {
+        @Override public void handle(ConsumerRecord<String, JsonNode> record) {}
     }
 
     @Test
-    void shouldResolveStringType() {
-        assertEquals(String.class, HandlerTypeResolver.resolve(new StringHandler()));
+    void shouldResolveStringStringTypes() {
+        HandlerTypeResolver.ResolvedTypes types = HandlerTypeResolver.resolve(new StringStringHandler());
+        assertEquals(String.class, types.getKeyType());
+        assertEquals(String.class, types.getValueType());
     }
 
     @Test
-    void shouldResolveJsonNodeType() {
-        assertEquals(JsonNode.class, HandlerTypeResolver.resolve(new JsonNodeHandler()));
+    void shouldResolveStringJsonNodeTypes() {
+        HandlerTypeResolver.ResolvedTypes types = HandlerTypeResolver.resolve(new StringJsonHandler());
+        assertEquals(String.class, types.getKeyType());
+        assertEquals(JsonNode.class, types.getValueType());
     }
 
     @Test
-    void shouldResolveByteArrayType() {
-        assertEquals(byte[].class, HandlerTypeResolver.resolve(new ByteArrayHandler()));
+    void shouldResolveLongByteArrayTypes() {
+        HandlerTypeResolver.ResolvedTypes types = HandlerTypeResolver.resolve(new LongBytesHandler());
+        assertEquals(Long.class, types.getKeyType());
+        assertEquals(byte[].class, types.getValueType());
     }
 
     @Test
-    void shouldResolveObjectType() {
-        assertEquals(Object.class, HandlerTypeResolver.resolve(new ObjectHandler()));
-    }
-
-    @Test
-    void shouldResolveParameterizedMapType() {
-        assertEquals(Map.class, HandlerTypeResolver.resolve(new MapHandler()));
+    void shouldResolveObjectValueType() {
+        HandlerTypeResolver.ResolvedTypes types = HandlerTypeResolver.resolve(new StringObjectHandler());
+        assertEquals(String.class, types.getKeyType());
+        assertEquals(Object.class, types.getValueType());
     }
 
     @Test
     void shouldResolveFromAbstractBaseClass() {
-        assertEquals(String.class, HandlerTypeResolver.resolve(new ExtendedStringHandler()));
+        HandlerTypeResolver.ResolvedTypes types = HandlerTypeResolver.resolve(new ExtendedHandler());
+        assertEquals(String.class, types.getKeyType());
+        assertEquals(JsonNode.class, types.getValueType());
     }
 
     @Test
     void shouldResolveFromAnonymousClass() {
-        MessageHandler<JsonNode> anonymous = new MessageHandler<JsonNode>() {
-            @Override
-            public void handle(MessageEnvelope<JsonNode> message) {}
+        MessageHandler<Long, String> anonymous = new MessageHandler<>() {
+	        @Override
+	        public void handle(ConsumerRecord<Long, String> record) {
+	        }
         };
-        assertEquals(JsonNode.class, HandlerTypeResolver.resolve(anonymous));
+        HandlerTypeResolver.ResolvedTypes types = HandlerTypeResolver.resolve(anonymous);
+        assertEquals(Long.class, types.getKeyType());
+        assertEquals(String.class, types.getValueType());
     }
 
     @Test
     void shouldResolveFromDemoHandlers() {
-        assertEquals(String.class, HandlerTypeResolver.resolve(new DemoHandlers.ProcessDemoEvent()));
-        assertEquals(JsonNode.class, HandlerTypeResolver.resolve(new DemoHandlers.ProcessOrder()));
-        assertEquals(PaymentEvent.class, HandlerTypeResolver.resolve(new DemoHandlers.ProcessPayment()));
-        assertEquals(byte[].class, HandlerTypeResolver.resolve(new DemoHandlers.ProcessRawData()));
+        var demo = HandlerTypeResolver.resolve(new MessageHandlers.ProcessDemoEvent());
+        assertEquals(String.class, demo.getKeyType());
+        assertEquals(String.class, demo.getValueType());
+
+        var order = HandlerTypeResolver.resolve(new MessageHandlers.ProcessOrder());
+        assertEquals(String.class, order.getKeyType());
+        assertEquals(JsonNode.class, order.getValueType());
+
+        var payment = HandlerTypeResolver.resolve(new MessageHandlers.ProcessPayment());
+        assertEquals(String.class, payment.getKeyType());
+        assertEquals(PaymentEvent.class, payment.getValueType());
+
+        var raw = HandlerTypeResolver.resolve(new MessageHandlers.ProcessRawData());
+        assertEquals(String.class, raw.getKeyType());
+        assertEquals(byte[].class, raw.getValueType());
     }
 }

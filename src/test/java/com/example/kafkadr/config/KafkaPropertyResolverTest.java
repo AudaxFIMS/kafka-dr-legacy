@@ -52,7 +52,7 @@ class KafkaPropertyResolverTest {
 
     @Test
     void perTopicConsumerPropertiesShouldOverrideDefaults() {
-        ConsumerConfig paymentConsumer = config.getConsumers().stream()
+        DrConsumerConfig paymentConsumer = config.getConsumers().stream()
                 .filter(c -> c.getTopic().equals("payment-events"))
                 .findFirst().orElseThrow();
 
@@ -69,7 +69,7 @@ class KafkaPropertyResolverTest {
 
     @Test
     void perTopicProducerPropertiesShouldOverrideDefaults() {
-        ProducerConfig paymentProducer = config.getProducers().stream()
+        DrProducerConfig paymentProducer = config.getProducers().stream()
                 .filter(p -> p.getTopic().equals("payment-events"))
                 .findFirst().orElseThrow();
 

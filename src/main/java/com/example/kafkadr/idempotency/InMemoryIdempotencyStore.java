@@ -10,13 +10,10 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * In-memory idempotency store that prevents duplicate message processing.
- * Uses a ConcurrentHashMap with TTL-based eviction.
- *
- * The key is constructed as: {prefix}:{topic}:{partition}:{offset}
- * or a custom idempotency key from the message header.
+ * In-memory {@link IdempotencyStore} implementation using ConcurrentHashMap with TTL-based eviction.
+ * Suitable for single-instance deployments. For multi-instance, use a Redis or DB implementation.
  */
-public class InMemoryIdempotencyStore {
+public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     private static final Logger log = LoggerFactory.getLogger(InMemoryIdempotencyStore.class);
 
@@ -35,43 +32,26 @@ public class InMemoryIdempotencyStore {
             return t;
         });
 
-        // Run cleanup every 1/10 of TTL or at least every 60 seconds
         long cleanupInterval = Math.max(ttlMillis / 10, 60_000L);
         cleanupScheduler.scheduleWithFixedDelay(this::evictExpired, cleanupInterval, cleanupInterval, TimeUnit.MILLISECONDS);
 
-        log.info("IdempotencyStore initialized with TTL={}s, prefix='{}'", config.getTtlSeconds(), keyPrefix);
+        log.info("InMemoryIdempotencyStore initialized: TTL={}s, prefix='{}'", config.getTtlSeconds(), keyPrefix);
     }
 
-    /**
-     * Build a key from topic/partition/offset.
-     */
-    public String buildKey(String topic, int partition, long offset) {
-        return keyPrefix + ":" + topic + ":" + partition + ":" + offset;
+    public String getKeyPrefix() {
+        return keyPrefix;
     }
 
-    /**
-     * Build a key from a custom idempotency header value.
-     */
-    public String buildKey(String customKey) {
-        return keyPrefix + ":" + customKey;
-    }
-
-    /**
-     * Check if a message has already been processed. If not, mark it as processed.
-     *
-     * @return true if the message is a duplicate (already processed), false if it's new
-     */
+    @Override
     public boolean isDuplicate(String key) {
         long now = System.currentTimeMillis();
         Long existingTimestamp = processedKeys.putIfAbsent(key, now);
 
         if (existingTimestamp != null) {
-            // Key exists — check if it's still within TTL
             if (now - existingTimestamp < ttlMillis) {
                 log.debug("Duplicate detected for key: {}", key);
                 return true;
             }
-            // Expired entry — update timestamp and treat as new
             processedKeys.put(key, now);
             return false;
         }
@@ -79,26 +59,24 @@ public class InMemoryIdempotencyStore {
         return false;
     }
 
-    /**
-     * Explicitly mark a key as processed (e.g., after successful handling).
-     */
+    @Override
     public void markProcessed(String key) {
         processedKeys.put(key, System.currentTimeMillis());
     }
 
-    /**
-     * Remove all entries (e.g., when switching clusters and you want a clean state).
-     */
+    @Override
     public void clear() {
         int size = processedKeys.size();
         processedKeys.clear();
         log.info("IdempotencyStore cleared ({} entries removed)", size);
     }
 
+    @Override
     public int size() {
         return processedKeys.size();
     }
 
+    @Override
     public void stop() {
         cleanupScheduler.shutdown();
         try {

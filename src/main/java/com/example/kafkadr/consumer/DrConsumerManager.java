@@ -2,19 +2,20 @@ package com.example.kafkadr.consumer;
 
 import com.example.kafkadr.cluster.ClusterInfo;
 import com.example.kafkadr.cluster.ClusterSwitchListener;
-import com.example.kafkadr.config.ConsumerConfig;
+import com.example.kafkadr.config.DrConsumerConfig;
 import com.example.kafkadr.config.KafkaDrConfig;
 import com.example.kafkadr.config.KafkaPropertyResolver;
-import com.example.kafkadr.handler.MessageEnvelope;
+import com.example.kafkadr.handler.HandlerTypeResolver;
 import com.example.kafkadr.handler.MessageHandler;
 import com.example.kafkadr.handler.MessageHandlerRegistry;
-import com.example.kafkadr.idempotency.InMemoryIdempotencyStore;
+import com.example.kafkadr.idempotency.IdempotencyStore;
 import com.example.kafkadr.serialization.ContentType;
 import com.example.kafkadr.serialization.MessageDeserializer;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.errors.WakeupException;
-import org.apache.kafka.common.header.Header;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,18 +35,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class DrConsumerManager implements ClusterSwitchListener {
 
     private static final Logger log = LoggerFactory.getLogger(DrConsumerManager.class);
-    private static final String IDEMPOTENCY_KEY_HEADER = "x-idempotency-key";
-
     private final KafkaDrConfig config;
     private final MessageHandlerRegistry handlerRegistry;
-    private final InMemoryIdempotencyStore idempotencyStore;
+    private final IdempotencyStore idempotencyStore;
 
     private final List<ConsumerWorker> activeWorkers = new CopyOnWriteArrayList<>();
     private ExecutorService executorService;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     public DrConsumerManager(KafkaDrConfig config, MessageHandlerRegistry handlerRegistry,
-                             InMemoryIdempotencyStore idempotencyStore) {
+                             IdempotencyStore idempotencyStore) {
         this.config = config;
         this.handlerRegistry = handlerRegistry;
         this.idempotencyStore = idempotencyStore;
@@ -73,13 +72,13 @@ public class DrConsumerManager implements ClusterSwitchListener {
             return t;
         });
 
-        for (ConsumerConfig consumerConfig : config.getConsumers()) {
-            ConsumerWorker worker = new ConsumerWorker(cluster, consumerConfig);
+        for (DrConsumerConfig drConsumerConfig : config.getConsumers()) {
+            ConsumerWorker worker = new ConsumerWorker(cluster, drConsumerConfig);
             activeWorkers.add(worker);
             executorService.submit(worker);
             log.info("Started consumer for topic='{}', group='{}', handler='{}', content-type='{}' on cluster '{}'",
-                    consumerConfig.getTopic(), consumerConfig.getGroup(),
-                    consumerConfig.getHandler(), consumerConfig.getContentType(),
+                    drConsumerConfig.getTopic(), drConsumerConfig.getGroup(),
+                    drConsumerConfig.getHandler(), drConsumerConfig.getContentType(),
                     cluster.getName());
         }
     }
@@ -107,29 +106,29 @@ public class DrConsumerManager implements ClusterSwitchListener {
         log.info("All consumers stopped");
     }
 
-    private Properties buildConsumerProperties(ClusterInfo cluster, ConsumerConfig consumerConfig) {
-        // Resolve full property chain: default-properties -> per-cluster -> default-consumer -> per-topic
+    private Properties buildConsumerProperties(ClusterInfo cluster, DrConsumerConfig drConsumerConfig) {
         Properties props = KafkaPropertyResolver.resolveConsumerProperties(
-                config, cluster.getName(), consumerConfig);
+                config, cluster.getName(), drConsumerConfig);
 
-        // Consumer-specific fixed settings
-        props.put(org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
                 cluster.getBootstrapServers());
-        props.put(org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG,
-                consumerConfig.getGroup());
-        props.put(org.apache.kafka.clients.consumer.ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        props.put(org.apache.kafka.clients.consumer.ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG,
+                drConsumerConfig.getGroup());
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 
-        ContentType contentType = ContentType.fromString(consumerConfig.getContentType());
+        ContentType keyType = ContentType.fromString(drConsumerConfig.getKeyContentType());
+        ContentType valueType = ContentType.fromString(drConsumerConfig.getContentType());
 
-        if (contentType != ContentType.NATIVE) {
-            props.put(org.apache.kafka.clients.consumer.ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
-                    "org.apache.kafka.common.serialization.StringDeserializer");
-            props.put(org.apache.kafka.clients.consumer.ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
+        // Key deserializer: use ByteArray for non-native, let Kafka handle native
+        if (keyType != ContentType.NATIVE) {
+            props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
                     "org.apache.kafka.common.serialization.ByteArrayDeserializer");
-        } else {
-            props.put(org.apache.kafka.clients.consumer.ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
-                    "org.apache.kafka.common.serialization.StringDeserializer");
+        }
+        // Value deserializer: use ByteArray for non-native, let Kafka handle native
+        if (valueType != ContentType.NATIVE) {
+            props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
+                    "org.apache.kafka.common.serialization.ByteArrayDeserializer");
         }
 
         return props;
@@ -137,35 +136,39 @@ public class DrConsumerManager implements ClusterSwitchListener {
 
     /**
      * Internal worker that runs a single KafkaConsumer in a poll loop.
-     * Resolves the handler's generic type T via reflection at startup,
-     * then deserializes each record into T before dispatching.
+     * Deserializes both key (K) and value (V) into the types declared
+     * by the handler's generic parameters, then dispatches a typed ConsumerRecord.
      */
     private class ConsumerWorker implements Runnable {
 
         private final ClusterInfo cluster;
-        private final ConsumerConfig consumerConfig;
-        private final ContentType contentType;
+        private final DrConsumerConfig drConsumerConfig;
+        private final ContentType keyContentType;
+        private final ContentType valueContentType;
         private volatile KafkaConsumer<?, ?> consumer;
         private final AtomicBoolean stopped = new AtomicBoolean(false);
 
-        ConsumerWorker(ClusterInfo cluster, ConsumerConfig consumerConfig) {
+        ConsumerWorker(ClusterInfo cluster, DrConsumerConfig drConsumerConfig) {
             this.cluster = cluster;
-            this.consumerConfig = consumerConfig;
-            this.contentType = ContentType.fromString(consumerConfig.getContentType());
+            this.drConsumerConfig = drConsumerConfig;
+            this.keyContentType = ContentType.fromString(drConsumerConfig.getKeyContentType());
+            this.valueContentType = ContentType.fromString(drConsumerConfig.getContentType());
         }
 
         @Override
-        @SuppressWarnings("unchecked")
         public void run() {
-            Properties props = buildConsumerProperties(cluster, consumerConfig);
+            Properties props = buildConsumerProperties(cluster, drConsumerConfig);
             consumer = new KafkaConsumer<>(props);
-            consumer.subscribe(Collections.singletonList(consumerConfig.getTopic()));
+            consumer.subscribe(Collections.singletonList(drConsumerConfig.getTopic()));
 
-            MessageHandler<?> handler = handlerRegistry.getHandler(consumerConfig.getHandler());
-            Class<?> targetType = handlerRegistry.getHandlerType(consumerConfig.getHandler());
+            MessageHandler<?, ?> handler = handlerRegistry.getHandler(drConsumerConfig.getHandler());
+            HandlerTypeResolver.ResolvedTypes types = handlerRegistry.getHandlerTypes(drConsumerConfig.getHandler());
 
-            log.info("Consumer worker started: topic={}, contentType={}, targetType={}, cluster={}",
-                    consumerConfig.getTopic(), contentType, targetType.getSimpleName(), cluster.getName());
+            log.info("Consumer worker started: topic={}, key={}<{}>, value={}<{}>, cluster={}",
+                    drConsumerConfig.getTopic(),
+                    keyContentType, types.getKeyType().getSimpleName(),
+                    valueContentType, types.getValueType().getSimpleName(),
+                    cluster.getName());
 
             try {
                 while (!stopped.get() && running.get()) {
@@ -173,14 +176,10 @@ public class DrConsumerManager implements ClusterSwitchListener {
                         ConsumerRecords<?, ?> records = consumer.poll(Duration.ofMillis(1000));
                         if (records.isEmpty()) continue;
 
+                        String keyPrefix = config.getIdempotency().getKeyPrefix();
                         records.forEach(record -> {
-                            String idempotencyKey = extractIdempotencyKey(record);
-                            if (idempotencyKey == null) {
-                                idempotencyKey = idempotencyStore.buildKey(
-                                        record.topic(), record.partition(), record.offset());
-                            } else {
-                                idempotencyKey = idempotencyStore.buildKey(idempotencyKey);
-                            }
+                            String msgKey = record.key() != null ? record.key().toString() : "";
+                            String idempotencyKey = keyPrefix + ":" + record.topic() + ":" + msgKey;
 
                             if (idempotencyStore.isDuplicate(idempotencyKey)) {
                                 log.debug("Skipping duplicate: topic={}, partition={}, offset={}",
@@ -189,9 +188,14 @@ public class DrConsumerManager implements ClusterSwitchListener {
                             }
 
                             try {
-                                // Deserialize using content-type + handler's resolved generic type T
-                                Object deserialized = MessageDeserializer.deserialize(record, contentType, targetType);
-                                dispatchTyped(handler, record, deserialized, cluster.getName());
+                                Object key = MessageDeserializer.deserialize(
+                                        record.key(), keyContentType, types.getKeyType(),
+                                        record.topic(), record.partition(), record.offset());
+                                Object value = MessageDeserializer.deserialize(
+                                        record.value(), valueContentType, types.getValueType(),
+                                        record.topic(), record.partition(), record.offset());
+
+                                dispatchTyped(handler, record, key, value);
                                 idempotencyStore.markProcessed(idempotencyKey);
                             } catch (Exception e) {
                                 log.error("Error processing message: topic={}, partition={}, offset={}",
@@ -202,7 +206,7 @@ public class DrConsumerManager implements ClusterSwitchListener {
                         consumer.commitSync();
                     } catch (WakeupException e) {
                         if (!stopped.get()) {
-                            log.warn("Consumer wakeup without shutdown signal, topic={}", consumerConfig.getTopic());
+                            log.warn("Consumer wakeup without shutdown signal, topic={}", drConsumerConfig.getTopic());
                         }
                     }
                 }
@@ -210,21 +214,27 @@ public class DrConsumerManager implements ClusterSwitchListener {
                 try {
                     consumer.close(Duration.ofSeconds(5));
                 } catch (Exception e) {
-                    log.warn("Error closing consumer for topic={}", consumerConfig.getTopic(), e);
+                    log.warn("Error closing consumer for topic={}", drConsumerConfig.getTopic(), e);
                 }
-                log.info("Consumer worker stopped: topic={}, cluster={}", consumerConfig.getTopic(), cluster.getName());
+                log.info("Consumer worker stopped: topic={}, cluster={}", drConsumerConfig.getTopic(), cluster.getName());
             }
         }
 
+        /**
+         * Build a typed ConsumerRecord&lt;K, V&gt; with deserialized key and value,
+         * preserving all original metadata (headers, timestamp, partition, offset).
+         */
         @SuppressWarnings({"unchecked", "rawtypes"})
         private void dispatchTyped(MessageHandler handler,
-                                   org.apache.kafka.clients.consumer.ConsumerRecord<?, ?> record,
-                                   Object deserialized, String clusterName) {
-            MessageEnvelope envelope = new MessageEnvelope(
-                    record.topic(), record.key(), deserialized,
-                    record.partition(), record.offset(),
-                    clusterName, contentType);
-            handler.handle(envelope);
+                                   ConsumerRecord<?, ?> raw,
+                                   Object key, Object value) {
+            ConsumerRecord typedRecord = new ConsumerRecord(
+                    raw.topic(), raw.partition(), raw.offset(),
+                    raw.timestamp(), raw.timestampType(),
+                    raw.serializedKeySize(), raw.serializedValueSize(),
+                    key, value,
+                    raw.headers(), raw.leaderEpoch());
+            handler.handle(typedRecord);
         }
 
         void shutdown() {
@@ -234,12 +244,5 @@ public class DrConsumerManager implements ClusterSwitchListener {
             }
         }
 
-        private String extractIdempotencyKey(org.apache.kafka.clients.consumer.ConsumerRecord<?, ?> record) {
-            Header header = record.headers().lastHeader(IDEMPOTENCY_KEY_HEADER);
-            if (header != null && header.value() != null) {
-                return new String(header.value());
-            }
-            return null;
-        }
     }
 }

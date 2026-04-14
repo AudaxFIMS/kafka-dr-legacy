@@ -9,16 +9,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Resolves the generic type parameter {@code T} from a {@link MessageHandler}
- * implementation via reflection.
+ * Resolves generic type parameters {@code K} and {@code V} from a
+ * {@link MessageHandler MessageHandler&lt;K, V&gt;} implementation via reflection.
  *
- * <p>Supports:
- * <ul>
- *   <li>Direct implementation: {@code class X implements MessageHandler<String>}</li>
- *   <li>Abstract base class: {@code class X extends Base<String>} where
- *       {@code Base<T> implements MessageHandler<T>}</li>
- *   <li>Anonymous classes</li>
- * </ul>
+ * <p>Supports direct implementations, abstract base classes, and anonymous classes.
  */
 public final class HandlerTypeResolver {
 
@@ -26,26 +20,45 @@ public final class HandlerTypeResolver {
     }
 
     /**
-     * Extract the concrete {@code Class<?>} for the type parameter T
-     * of {@code MessageHandler<T>} from the given handler instance.
+     * Result holder for the two resolved type parameters.
      */
-    public static Class<?> resolve(MessageHandler<?> handler) {
+    public static class ResolvedTypes {
+        private final Class<?> keyType;
+        private final Class<?> valueType;
+
+        public ResolvedTypes(Class<?> keyType, Class<?> valueType) {
+            this.keyType = keyType;
+            this.valueType = valueType;
+        }
+
+        public Class<?> getKeyType() {
+            return keyType;
+        }
+
+        public Class<?> getValueType() {
+            return valueType;
+        }
+
+        @Override
+        public String toString() {
+            return "ResolvedTypes{K=" + keyType.getSimpleName() + ", V=" + valueType.getSimpleName() + "}";
+        }
+    }
+
+    /**
+     * Extract the concrete types for K and V from {@code MessageHandler<K, V>}.
+     */
+    public static ResolvedTypes resolve(MessageHandler<?, ?> handler) {
         Map<TypeVariable<?>, Type> typeBindings = new HashMap<>();
         Class<?> clazz = handler.getClass();
 
-        // Walk up the class hierarchy, collecting type variable bindings
         while (clazz != null && clazz != Object.class) {
-            // Check interfaces at this level
-            Type[] genericInterfaces = clazz.getGenericInterfaces();
-            for (Type iface : genericInterfaces) {
-                Class<?> result = checkType(iface, typeBindings);
+            for (Type iface : clazz.getGenericInterfaces()) {
+                ResolvedTypes result = checkType(iface, typeBindings);
                 if (result != null) return result;
-
-                // If the interface is parameterized, record its type bindings
                 collectBindings(iface, typeBindings);
             }
 
-            // Record bindings from the superclass declaration
             Type genericSuper = clazz.getGenericSuperclass();
             if (genericSuper != null) {
                 collectBindings(genericSuper, typeBindings);
@@ -55,26 +68,30 @@ public final class HandlerTypeResolver {
         }
 
         throw new IllegalArgumentException(
-                "Cannot resolve generic type T for handler: " + handler.getClass().getName() +
-                ". Ensure it implements MessageHandler<T> with a concrete type.");
+                "Cannot resolve generic types K, V for handler: " + handler.getClass().getName() +
+                ". Ensure it implements MessageHandler<K, V> with concrete types.");
     }
 
-    /**
-     * If {@code type} is {@code MessageHandler<X>}, resolve X to a Class and return it.
-     */
-    private static Class<?> checkType(Type type, Map<TypeVariable<?>, Type> bindings) {
+    private static ResolvedTypes checkType(Type type, Map<TypeVariable<?>, Type> bindings) {
         if (!(type instanceof ParameterizedType)) return null;
 
         ParameterizedType pt = (ParameterizedType) type;
         if (pt.getRawType() != MessageHandler.class) return null;
 
-        Type arg = pt.getActualTypeArguments()[0];
-        return resolveType(arg, bindings);
+        Type[] args = pt.getActualTypeArguments();
+        if (args.length < 2) return null;
+
+        Class<?> keyType = resolveType(args[0], bindings);
+        Class<?> valueType = resolveType(args[1], bindings);
+
+        if (keyType == null || valueType == null) {
+            throw new IllegalArgumentException(
+                    "Cannot resolve MessageHandler<K, V> types: K=" + args[0] + ", V=" + args[1]);
+        }
+
+        return new ResolvedTypes(keyType, valueType);
     }
 
-    /**
-     * Resolve a Type to a concrete Class, following TypeVariable bindings if needed.
-     */
     private static Class<?> resolveType(Type type, Map<TypeVariable<?>, Type> bindings) {
         if (type instanceof Class) {
             return (Class<?>) type;
@@ -100,11 +117,6 @@ public final class HandlerTypeResolver {
         return null;
     }
 
-    /**
-     * Record mappings from TypeVariables to their actual type arguments.
-     * E.g., for {@code class Foo extends Base<String>}, if Base declares {@code <T>},
-     * we record {@code T → String}.
-     */
     private static void collectBindings(Type type, Map<TypeVariable<?>, Type> bindings) {
         if (!(type instanceof ParameterizedType)) return;
 
@@ -117,7 +129,6 @@ public final class HandlerTypeResolver {
 
         for (int i = 0; i < typeParams.length && i < actualArgs.length; i++) {
             Type resolved = actualArgs[i];
-            // If the actual arg is itself a type variable, follow existing bindings
             if (resolved instanceof TypeVariable) {
                 Type bound = bindings.get(resolved);
                 if (bound != null) {

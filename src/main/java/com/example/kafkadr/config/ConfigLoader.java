@@ -136,12 +136,15 @@ public class ConfigLoader {
         // Parse consumers
         if (map.containsKey("consumers")) {
             List<Map<String, Object>> consumersList = (List<Map<String, Object>>) map.get("consumers");
-            List<ConsumerConfig> consumers = new ArrayList<>();
+            List<DrConsumerConfig> consumers = new ArrayList<>();
             for (Map<String, Object> cm : consumersList) {
-                ConsumerConfig cc = new ConsumerConfig();
+                DrConsumerConfig cc = new DrConsumerConfig();
                 cc.setTopic((String) cm.get("topic"));
                 cc.setGroup((String) cm.get("group"));
                 cc.setHandler((String) cm.get("handler"));
+                if (cm.containsKey("key-content-type")) {
+                    cc.setKeyContentType((String) cm.get("key-content-type"));
+                }
                 cc.setContentType((String) cm.get("content-type"));
                 if (cm.containsKey("properties")) {
                     cc.setProperties((Map<String, Object>) cm.get("properties"));
@@ -154,9 +157,9 @@ public class ConfigLoader {
         // Parse producers
         if (map.containsKey("producers")) {
             List<Map<String, Object>> producersList = (List<Map<String, Object>>) map.get("producers");
-            List<ProducerConfig> producers = new ArrayList<>();
+            List<DrProducerConfig> producers = new ArrayList<>();
             for (Map<String, Object> pm : producersList) {
-                ProducerConfig pc = new ProducerConfig();
+                DrProducerConfig pc = new DrProducerConfig();
                 pc.setTopic((String) pm.get("topic"));
                 pc.setContentType((String) pm.get("content-type"));
                 if (pm.containsKey("properties")) {

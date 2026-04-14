@@ -14,8 +14,8 @@ public class KafkaDrConfig {
     private Map<String, Object> defaultConsumerProperties = new LinkedHashMap<>();
     private Map<String, Object> defaultProducerProperties = new LinkedHashMap<>();
     private Map<String, ClusterConfig> clusters = new LinkedHashMap<>();
-    private List<ConsumerConfig> consumers;
-    private List<ProducerConfig> producers;
+    private List<DrConsumerConfig> consumers;
+    private List<DrProducerConfig> producers;
     private HealthCheckConfig healthCheck = new HealthCheckConfig();
     private LateInitializerConfig lateInitializer = new LateInitializerConfig();
     private IdempotencyConfig idempotency = new IdempotencyConfig();
@@ -60,19 +60,19 @@ public class KafkaDrConfig {
         this.clusters = clusters;
     }
 
-    public List<ConsumerConfig> getConsumers() {
+    public List<DrConsumerConfig> getConsumers() {
         return consumers;
     }
 
-    public void setConsumers(List<ConsumerConfig> consumers) {
+    public void setConsumers(List<DrConsumerConfig> consumers) {
         this.consumers = consumers;
     }
 
-    public List<ProducerConfig> getProducers() {
+    public List<DrProducerConfig> getProducers() {
         return producers;
     }
 
-    public void setProducers(List<ProducerConfig> producers) {
+    public void setProducers(List<DrProducerConfig> producers) {
         this.producers = producers;
     }
 

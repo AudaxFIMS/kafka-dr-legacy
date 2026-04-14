@@ -6,10 +6,11 @@ import com.example.kafkadr.config.ClusterConfig;
 import com.example.kafkadr.config.ConfigLoader;
 import com.example.kafkadr.config.KafkaDrConfig;
 import com.example.kafkadr.consumer.DrConsumerManager;
-import com.example.kafkadr.handler.DemoHandlers;
+import com.example.kafkadr.handler.MessageHandlers;
 import com.example.kafkadr.handler.MessageHandlerRegistry;
 import com.example.kafkadr.health.ClusterHealthChecker;
 import com.example.kafkadr.health.KafkaAdminHelper;
+import com.example.kafkadr.idempotency.IdempotencyStore;
 import com.example.kafkadr.idempotency.InMemoryIdempotencyStore;
 import com.example.kafkadr.producer.DrProducerManager;
 import com.example.kafkadr.rest.RestServer;
@@ -44,7 +45,7 @@ public class KafkaDrApplication {
     private ClusterHealthChecker healthChecker;
     private DrConsumerManager consumerManager;
     private DrProducerManager producerManager;
-    private InMemoryIdempotencyStore idempotencyStore;
+    private IdempotencyStore idempotencyStore;
     private LateBindingInitializer lateInitializer;
     private RestServer restServer;
 
@@ -75,7 +76,7 @@ public class KafkaDrApplication {
         idempotencyStore = new InMemoryIdempotencyStore(config.getIdempotency());
 
         MessageHandlerRegistry handlerRegistry = new MessageHandlerRegistry();
-        DemoHandlers.registerAll(handlerRegistry);
+        MessageHandlers.registerAll(handlerRegistry);
 
         consumerManager = new DrConsumerManager(config, handlerRegistry, idempotencyStore);
         producerManager = new DrProducerManager(config, clusterManager);
@@ -152,7 +153,7 @@ public class KafkaDrApplication {
         return consumerManager;
     }
 
-    public InMemoryIdempotencyStore getIdempotencyStore() {
+    public IdempotencyStore getIdempotencyStore() {
         return idempotencyStore;
     }
 

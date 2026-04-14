@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class InMemoryIdempotencyStoreTest {
 
-    private InMemoryIdempotencyStore store;
+    private IdempotencyStore store;
 
     @BeforeEach
     void setUp() {
@@ -26,33 +26,33 @@ class InMemoryIdempotencyStoreTest {
 
     @Test
     void shouldNotDetectDuplicateForNewKey() {
-        String key = store.buildKey("topic", 0, 1);
-        assertFalse(store.isDuplicate(key));
+        assertFalse(store.isDuplicate("test:order-events:ORD-001"));
     }
 
     @Test
     void shouldDetectDuplicateForExistingKey() {
-        String key = store.buildKey("topic", 0, 1);
+        String key = "test:order-events:ORD-001";
         assertFalse(store.isDuplicate(key));
         assertTrue(store.isDuplicate(key));
     }
 
     @Test
-    void shouldBuildKeyWithPrefix() {
-        String key = store.buildKey("topic", 0, 42);
-        assertEquals("test:topic:0:42", key);
+    void shouldDistinguishDifferentKeys() {
+        assertFalse(store.isDuplicate("test:order-events:ORD-001"));
+        assertFalse(store.isDuplicate("test:order-events:ORD-002"));
+        assertTrue(store.isDuplicate("test:order-events:ORD-001"));
     }
 
     @Test
-    void shouldBuildCustomKey() {
-        String key = store.buildKey("my-custom-key");
-        assertEquals("test:my-custom-key", key);
+    void shouldDistinguishDifferentTopics() {
+        assertFalse(store.isDuplicate("test:order-events:KEY-1"));
+        assertFalse(store.isDuplicate("test:payment-events:KEY-1"));
     }
 
     @Test
     void shouldClearAllEntries() {
-        store.isDuplicate(store.buildKey("topic", 0, 1));
-        store.isDuplicate(store.buildKey("topic", 0, 2));
+        store.isDuplicate("test:t1:k1");
+        store.isDuplicate("test:t1:k2");
         assertEquals(2, store.size());
 
         store.clear();
@@ -61,7 +61,7 @@ class InMemoryIdempotencyStoreTest {
 
     @Test
     void shouldMarkProcessedExplicitly() {
-        String key = store.buildKey("manual-key");
+        String key = "test:order-events:ORD-099";
         store.markProcessed(key);
         assertTrue(store.isDuplicate(key));
     }
@@ -69,15 +69,14 @@ class InMemoryIdempotencyStoreTest {
     @Test
     void shouldHandleTtlExpiration() {
         IdempotencyConfig config = new IdempotencyConfig();
-        config.setTtlSeconds(0); // immediate expiration
+        config.setTtlSeconds(0);
         config.setKeyPrefix("expired");
-        InMemoryIdempotencyStore shortTtlStore = new InMemoryIdempotencyStore(config);
+        IdempotencyStore shortTtlStore = new InMemoryIdempotencyStore(config);
 
         try {
-            String key = shortTtlStore.buildKey("topic", 0, 1);
-            assertFalse(shortTtlStore.isDuplicate(key)); // marks it
-            // With 0 TTL, it should be considered expired immediately
+            String key = "expired:topic:k1";
             assertFalse(shortTtlStore.isDuplicate(key));
+            assertFalse(shortTtlStore.isDuplicate(key)); // TTL=0, already expired
         } finally {
             shortTtlStore.stop();
         }

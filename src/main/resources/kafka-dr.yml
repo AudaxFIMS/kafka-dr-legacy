@@ -60,10 +60,13 @@ kafka-dr:
       priority: 3
 
   # ─── Consumers ─────────────────────────────────────────────────────────────
+  # key-content-type: string (default) | json | bytes | native
+  # content-type:     string | json | bytes | native
   consumers:
     - topic: demo-events
       group: dr-demo-group
       handler: processDemoEvent
+      # key-content-type: string  ← default, can be omitted
       content-type: string
 
     - topic: order-events

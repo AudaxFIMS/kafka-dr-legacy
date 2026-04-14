@@ -41,7 +41,7 @@ class ConfigLoaderTest {
         assertNotNull(config.getConsumers());
         assertEquals(4, config.getConsumers().size());
 
-        ConsumerConfig first = config.getConsumers().get(0);
+        DrConsumerConfig first = config.getConsumers().get(0);
         assertEquals("demo-events", first.getTopic());
         assertEquals("dr-demo-group", first.getGroup());
         assertEquals("processDemoEvent", first.getHandler());
@@ -52,7 +52,7 @@ class ConfigLoaderTest {
     void shouldParseConsumerWithNativeProperties() {
         KafkaDrConfig config = ConfigLoader.load("kafka-dr.yml");
 
-        ConsumerConfig payment = config.getConsumers().get(2);
+        DrConsumerConfig payment = config.getConsumers().get(2);
         assertEquals("payment-events", payment.getTopic());
         assertEquals("native", payment.getContentType());
         assertNotNull(payment.getProperties());

@@ -48,15 +48,15 @@ public final class KafkaPropertyResolver {
      * Build consumer properties: base + default-consumer-properties + per-topic overrides.
      */
     public static Properties resolveConsumerProperties(KafkaDrConfig config, String clusterName,
-                                                       ConsumerConfig consumerConfig) {
+                                                       DrConsumerConfig drConsumerConfig) {
         Properties props = resolveBaseProperties(config, clusterName);
 
         // Layer 3: default-consumer-properties
         applyConfiguration(props, config.getDefaultConsumerProperties());
 
         // Layer 4: per-topic consumer overrides
-        if (consumerConfig != null) {
-            applyConfiguration(props, consumerConfig.getProperties());
+        if (drConsumerConfig != null) {
+            applyConfiguration(props, drConsumerConfig.getProperties());
         }
 
         return props;
@@ -66,15 +66,15 @@ public final class KafkaPropertyResolver {
      * Build producer properties: base + default-producer-properties + per-topic overrides.
      */
     public static Properties resolveProducerProperties(KafkaDrConfig config, String clusterName,
-                                                       ProducerConfig producerConfig) {
+                                                       DrProducerConfig drProducerConfig) {
         Properties props = resolveBaseProperties(config, clusterName);
 
         // Layer 3: default-producer-properties
         applyConfiguration(props, config.getDefaultProducerProperties());
 
         // Layer 4: per-topic producer overrides
-        if (producerConfig != null) {
-            applyConfiguration(props, producerConfig.getProperties());
+        if (drProducerConfig != null) {
+            applyConfiguration(props, drProducerConfig.getProperties());
         }
 
         return props;

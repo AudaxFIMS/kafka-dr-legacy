@@ -5,14 +5,14 @@ import com.example.kafkadr.cluster.ClusterManager;
 import com.example.kafkadr.cluster.ClusterSwitchListener;
 import com.example.kafkadr.config.KafkaDrConfig;
 import com.example.kafkadr.config.KafkaPropertyResolver;
-import com.example.kafkadr.config.ProducerConfig;
+import com.example.kafkadr.config.DrProducerConfig;
 import com.example.kafkadr.serialization.ContentType;
 import com.example.kafkadr.serialization.MessageSerializer;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.errors.*;
-import org.apache.kafka.common.header.internals.RecordHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,7 +40,7 @@ public class DrProducerManager implements ClusterSwitchListener {
     private final KafkaDrConfig config;
     private final ClusterManager clusterManager;
     private final Map<String, KafkaProducer<String, Object>> producers = new ConcurrentHashMap<>();
-    private final Map<String, ProducerConfig> producerConfigs = new ConcurrentHashMap<>();
+    private final Map<String, DrProducerConfig> producerConfigs = new ConcurrentHashMap<>();
     private final int maxRetries;
     private volatile ClusterInfo currentCluster;
 
@@ -49,7 +49,7 @@ public class DrProducerManager implements ClusterSwitchListener {
         this.clusterManager = clusterManager;
         this.maxRetries = config.getHealthCheck().getFailureThreshold();
         if (config.getProducers() != null) {
-            for (ProducerConfig pc : config.getProducers()) {
+            for (DrProducerConfig pc : config.getProducers()) {
                 producerConfigs.put(pc.getTopic(), pc);
             }
         }
@@ -69,7 +69,7 @@ public class DrProducerManager implements ClusterSwitchListener {
      * Send a message with resilient error handling.
      * On cluster-unavailable errors, triggers instant failover via ClusterManager.
      */
-    public RecordMetadata send(String topic, String key, Object value, String idempotencyKey) {
+    public RecordMetadata send(String topic, String key, Object value) {
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             ClusterInfo cluster = currentCluster;
             if (cluster == null) {
@@ -82,14 +82,11 @@ public class DrProducerManager implements ClusterSwitchListener {
                         ". Active cluster: " + cluster.getName());
             }
 
-            ProducerConfig pc = producerConfigs.get(topic);
+            DrProducerConfig pc = producerConfigs.get(topic);
             ContentType contentType = pc != null ? ContentType.fromString(pc.getContentType()) : ContentType.STRING;
             Object serializedValue = MessageSerializer.serialize(value, contentType);
 
             ProducerRecord<String, Object> record = new ProducerRecord<>(topic, key, serializedValue);
-            if (idempotencyKey != null) {
-                record.headers().add(new RecordHeader("x-idempotency-key", idempotencyKey.getBytes()));
-            }
 
             try {
                 Future<RecordMetadata> future = producer.send(record);
@@ -137,10 +134,6 @@ public class DrProducerManager implements ClusterSwitchListener {
         throw new IllegalStateException("Send loop exited unexpectedly for topic: " + topic);
     }
 
-    public RecordMetadata send(String topic, String key, Object value) {
-        return send(topic, key, value, null);
-    }
-
     public ClusterInfo getCurrentCluster() {
         return currentCluster;
     }
@@ -186,7 +179,7 @@ public class DrProducerManager implements ClusterSwitchListener {
     // ─── Producer lifecycle ─────────────────────────────────────
 
     private void createAllProducers(ClusterInfo cluster) {
-        for (ProducerConfig pc : producerConfigs.values()) {
+        for (DrProducerConfig pc : producerConfigs.values()) {
             Properties props = buildProducerProperties(cluster, pc);
             KafkaProducer<String, Object> producer = new KafkaProducer<>(props);
             producers.put(pc.getTopic(), producer);
@@ -207,28 +200,28 @@ public class DrProducerManager implements ClusterSwitchListener {
         producers.clear();
     }
 
-    private Properties buildProducerProperties(ClusterInfo cluster, ProducerConfig producerConfig) {
+    private Properties buildProducerProperties(ClusterInfo cluster, DrProducerConfig drProducerConfig) {
         // Resolve full property chain: default-properties -> per-cluster -> default-producer -> per-topic
         Properties props = KafkaPropertyResolver.resolveProducerProperties(
-                config, cluster.getName(), producerConfig);
+                config, cluster.getName(), drProducerConfig);
 
         // Producer-specific fixed settings
-        props.put(org.apache.kafka.clients.producer.ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
                 cluster.getBootstrapServers());
 
-        ContentType contentType = ContentType.fromString(producerConfig.getContentType());
+        ContentType contentType = ContentType.fromString(drProducerConfig.getContentType());
 
         if (contentType != ContentType.NATIVE) {
-            props.put(org.apache.kafka.clients.producer.ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+            props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
                     "org.apache.kafka.common.serialization.StringSerializer");
-            props.put(org.apache.kafka.clients.producer.ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+            props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
                     "org.apache.kafka.common.serialization.StringSerializer");
             if (contentType == ContentType.BYTES) {
-                props.put(org.apache.kafka.clients.producer.ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+                props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
                         "org.apache.kafka.common.serialization.ByteArraySerializer");
             }
         } else {
-            props.put(org.apache.kafka.clients.producer.ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+            props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
                     "org.apache.kafka.common.serialization.StringSerializer");
         }
 

@@ -2,7 +2,7 @@
 
 A standalone Java application implementing **active-passive disaster recovery** across N Kafka clusters. The application automatically detects cluster failures, switches producers and consumers to the next healthy cluster, and fails back when the original cluster recovers.
 
-No Spring Boot, no Spring Cloud Stream -- plain Java 11 with the Kafka client library, SnakeYAML, Jackson, and a built-in JDK HTTP server.
+No Spring Boot, no Spring Cloud Stream -- plain Java 17 with the Kafka client library, SnakeYAML, Jackson, and a built-in JDK HTTP server.
 
 > **Important: Cross-cluster replication is required.**
 > This application handles failover at the *application level* -- switching producers and consumers between clusters. It does **not** replicate data between Kafka clusters. To ensure no messages are lost during failover, configure cross-cluster replication independently using [MirrorMaker 2](https://kafka.apache.org/documentation/#georeplication), Confluent Cluster Linking, or Confluent Replicator.
@@ -42,11 +42,13 @@ No Spring Boot, no Spring Cloud Stream -- plain Java 11 with the Kafka client li
 - **Instant first election** -- all clusters start as UNHEALTHY; first successful health check triggers immediate election without waiting for recovery threshold
 - **Synchronous send with ACK** -- `sync: true` + `acks: all` ensures broker acknowledgement before returning
 - **Consumer binding management** -- only the active cluster's consumers are running; they are stopped and recreated on switch
-- **Idempotent message processing** -- in-memory deduplication with TTL prevents duplicate processing during failover
+- **Idempotent message processing** -- pluggable deduplication (`IdempotencyStore` interface) with in-memory TTL implementation; key format: `{prefix}:{topic}:{message_key}`
 - **Multi-format support** -- String, JSON, Avro, and raw bytes payloads with per-topic configuration
-- **Type-safe handlers** -- `MessageHandler<T>` with automatic generic type resolution via reflection
+- **Type-safe handlers** -- `MessageHandler<K, V>` works directly with `ConsumerRecord<K, V>`; both key and value types resolved automatically via reflection
+- **Configurable key types** -- `key-content-type` per consumer for typed key deserialization (string, json, bytes, native)
 - **REST API** -- built-in endpoints for status monitoring and test message production
-- **Schema Registry** -- shared SR instance for Avro/Protobuf schema management across all clusters
+- **Full SSL/SASL support** -- `default-properties.configuration` propagates to all Kafka clients including AdminClient (health checks, probes, topic provisioning)
+- **Per-cluster property overrides** -- different SSL certs or SASL credentials per cluster/region
 - **Fully dynamic configuration** -- clusters, consumers, and producers defined in YAML; no code changes needed
 
 ## Project Structure
@@ -60,9 +62,17 @@ src/main/
     config/
       ConfigLoader.java                    # YAML parsing with ${ENV:default} substitution
       KafkaDrConfig.java                   # Root configuration model
+      KafkaPropertyResolver.java           # 4-layer property merge chain
+      ClusterConfig.java                   # Cluster: bootstrap-servers, priority, properties
+      DrConsumerConfig.java                # Consumer: topic, group, handler, content-type, key-content-type
+      DrProducerConfig.java                # Producer: topic, content-type, properties
+      HealthCheckConfig.java               # Health check tuning
+      IdempotencyConfig.java               # Idempotency tuning
+      LateInitializerConfig.java           # Late initializer tuning
     cluster/
       ClusterManager.java                  # Failover engine (election, forceUnhealthy, failback)
       ClusterInfo.java                     # Runtime cluster state + health counters
+      ClusterState.java                    # HEALTHY | UNHEALTHY | UNKNOWN
       ClusterSwitchListener.java           # Observer interface for failover events
       LateBindingInitializer.java          # Background recovery of unreachable clusters
     health/
@@ -74,12 +84,12 @@ src/main/
       DrProducerManager.java               # Resilient send with error classification + retry
       SendOutcome.java                     # Error classification enum
     handler/
-      MessageHandler.java                  # Generic handler interface (MessageHandler<T>)
-      MessageEnvelope.java                 # Type-safe record wrapper
+      MessageHandler.java                  # Generic handler: MessageHandler<K, V>
       MessageHandlerRegistry.java          # Handler lookup + type caching
-      HandlerTypeResolver.java             # Reflection-based generic type extraction
-      DemoHandlers.java                    # Example handlers for all content types
+      HandlerTypeResolver.java             # Reflection-based K, V type extraction
+      MessageHandlers.java                 # Example handlers for all content types
     idempotency/
+      IdempotencyStore.java                # Interface (swap in Redis/DB implementation)
       InMemoryIdempotencyStore.java        # ConcurrentHashMap with TTL eviction
     serialization/
       ContentType.java                     # STRING | JSON | BYTES | NATIVE
@@ -97,7 +107,7 @@ scripts/e2e-test.sh                        # End-to-end test script
 
 ### Prerequisites
 
-- Java 11+
+- Java 17+
 - Maven 3.8+
 - Docker & Docker Compose
 
@@ -190,6 +200,9 @@ kafka-dr:
     us-east:
       bootstrap-servers: kafka-us-east:9092
       priority: 1                    # Lowest value = highest priority
+      properties:                    # Per-cluster overrides
+        configuration:
+          ssl.truststore.location: /certs/us-east-truststore.p12
     eu-west:
       bootstrap-servers: kafka-eu-west:9092
       priority: 2
@@ -197,7 +210,7 @@ kafka-dr:
 
 ### Default Properties
 
-Base Kafka client properties applied to all clients (producers, consumers, AdminClients). SSL, SASL, timeouts, Schema Registry -- configure once, used everywhere:
+Base Kafka client properties applied to **all** clients: producers, consumers, and AdminClients (health checks, probes, topic provisioning). SSL, SASL, timeouts, Schema Registry -- configure once, used everywhere:
 
 ```yaml
 kafka-dr:
@@ -206,21 +219,43 @@ kafka-dr:
       reconnect.backoff.ms: 1000
       request.timeout.ms: 5000
       schema.registry.url: http://localhost:8081
+      # SSL
       security.protocol: SSL
       ssl.truststore.location: /certs/truststore.p12
+      ssl.truststore.password: ${SSL_TRUSTSTORE_PASSWORD:changeit}
+      # SASL
+      # security.protocol: SASL_SSL
+      # sasl.mechanism: PLAIN
+      # sasl.jaas.config: org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="secret";
+```
+
+### Property Resolution Chain
+
+Properties are merged in 4 layers (each overrides the previous):
+
+```
+1. default-properties.configuration          -- base (SSL, SASL, timeouts)
+2. clusters.{name}.properties.configuration  -- per-cluster overrides
+3. default-consumer/producer-properties.configuration  -- role defaults
+4. consumers/producers[].properties.configuration      -- per-topic overrides
 ```
 
 ### Consumers
 
-Each consumer defines a topic, consumer group, handler method name, and content type. Per-consumer `properties.configuration` overrides default properties.
+Each consumer defines a topic, consumer group, handler name, and content types for key and value:
 
 ```yaml
 kafka-dr:
+  default-consumer-properties:
+    configuration:
+      max.poll.records: 500
+
   consumers:
     - topic: order-events
       group: my-group
-      handler: processOrder          # Handler name in MessageHandlerRegistry
-      content-type: json             # json | string | bytes | native
+      handler: processOrder          # Name in MessageHandlerRegistry
+      key-content-type: string       # Key type: string (default) | json | bytes | native
+      content-type: json             # Value type: string | json | bytes | native
 
     - topic: payment-events
       group: my-group
@@ -234,11 +269,11 @@ kafka-dr:
 
 **Content types:**
 
-| Type | Deserialized Java type | Use case |
+| Type | Java type | Use case |
 |---|---|---|
 | `string` | `String` | Plain text messages |
-| `json` | `JsonNode` or any Jackson-deserializable POJO | JSON payloads |
-| `native` | Object from Kafka deserializer (Avro, Protobuf) | Schema Registry payloads |
+| `json` | `JsonNode` or any Jackson POJO | JSON payloads |
+| `native` | Kafka deserializer output (Avro, Protobuf) | Schema Registry payloads |
 | `bytes` | `byte[]` | Binary data |
 
 ### Producers
@@ -250,6 +285,8 @@ kafka-dr:
     configuration:
       acks: all
       max.block.ms: 5000
+      delivery.timeout.ms: 10000
+      request.timeout.ms: 5000
 
   producers:
     - topic: order-events
@@ -287,26 +324,39 @@ kafka-dr:
 ```yaml
 kafka-dr:
   idempotency:
-    ttl-seconds: 3600         # How long to remember processed message IDs
-    key-prefix: idempotency   # Key prefix for deduplication entries
+    ttl-seconds: 3600         # How long to remember processed message keys
+    key-prefix: idempotency   # Prefix for deduplication keys
 ```
+
+Idempotency key format: `{key-prefix}:{topic}:{message_key}`
+
+Example: `idempotency:order-events:ORD-001`
+
+The `IdempotencyStore` interface can be swapped for a Redis or DB implementation for multi-instance deployments.
 
 ## Adding Business Logic
 
 ### 1. Create a handler
 
+Handlers work directly with Kafka's `ConsumerRecord<K, V>` -- full access to key, value, headers, timestamp, and all metadata:
+
 ```java
-public class ProcessOrder implements MessageHandler<JsonNode> {
+public class ProcessOrder implements MessageHandler<String, JsonNode> {
     @Override
-    public void handle(MessageEnvelope<JsonNode> message) {
-        JsonNode order = message.getValue();    // type-safe, no casts
-        String orderId = order.path("orderId").asText();
-        // ... business logic
+    public void handle(ConsumerRecord<String, JsonNode> record) {
+        String orderId = record.key();           // typed String
+        JsonNode order = record.value();         // typed JsonNode
+
+        // Full Kafka record access
+        Headers headers = record.headers();
+        long timestamp = record.timestamp();
+        int partition = record.partition();
+        long offset = record.offset();
     }
 }
 ```
 
-The framework resolves `JsonNode` from the generic parameter automatically via reflection. No extra methods to override.
+Both `K` and `V` are resolved automatically via reflection from the generic parameters. No extra methods to override.
 
 ### 2. Register the handler
 
@@ -323,6 +373,7 @@ kafka-dr:
       group: my-group
       handler: processOrder
       content-type: json
+
   producers:
     - topic: order-events
       content-type: json
@@ -331,9 +382,41 @@ kafka-dr:
 ### 4. Send messages
 
 ```java
-producerManager.send("order-events", orderId, orderData);
-// or with idempotency key:
-producerManager.send("order-events", orderId, orderData, "unique-key-123");
+producerManager.send("order-events", "ORD-001", orderData);
+```
+
+### Handler Examples
+
+```java
+// String key, String value
+public class ProcessDemoEvent implements MessageHandler<String, String> {
+    public void handle(ConsumerRecord<String, String> record) {
+        String event = record.value();
+    }
+}
+
+// String key, Avro value
+public class ProcessPayment implements MessageHandler<String, PaymentEvent> {
+    public void handle(ConsumerRecord<String, PaymentEvent> record) {
+        PaymentEvent payment = record.value();
+        payment.getAmount();
+    }
+}
+
+// String key, raw bytes
+public class ProcessRawData implements MessageHandler<String, byte[]> {
+    public void handle(ConsumerRecord<String, byte[]> record) {
+        byte[] data = record.value();
+    }
+}
+
+// Long key, JsonNode value (with key-content-type: json in YAML)
+public class ProcessSensor implements MessageHandler<Long, JsonNode> {
+    public void handle(ConsumerRecord<Long, JsonNode> record) {
+        Long sensorId = record.key();
+        JsonNode reading = record.value();
+    }
+}
 ```
 
 ## How Failover Works
@@ -348,7 +431,7 @@ producerManager.send("order-events", orderId, orderData, "unique-key-123");
 5. ClusterManager initializes all clusters as UNHEALTHY
 6. ClusterHealthChecker starts -- probes every 5s
 7. First successful health check: instant election (no recovery threshold)
-8. ClusterSwitchEvent -> consumers started, producers created on elected cluster
+8. ClusterSwitchListener -> consumers started, producers created on elected cluster
 9. LateBindingInitializer monitors unreachable clusters in background
 ```
 
@@ -445,19 +528,22 @@ Built-in HTTP server on port 8088 (configurable via `REST_PORT` env var or `-Dre
 | No Spring framework | Minimal dependencies, full lifecycle control, suitable for legacy environments |
 | All clusters start UNHEALTHY | First health check immediately elects the first reachable cluster; subsequent recovery requires full threshold |
 | Instant failover from producer | Producer detects failures before health checker and forces immediate re-election via `forceUnhealthy()` |
-| Reflection-based type resolution | Handlers declare `MessageHandler<T>` once; `HandlerTypeResolver` extracts `T` automatically -- no boilerplate |
+| `MessageHandler<K, V>` with `ConsumerRecord` | Handlers work directly with Kafka's native API -- full access to headers, timestamps, metadata without wrappers |
+| Reflection-based type resolution | `HandlerTypeResolver` extracts both `K` and `V` from handler's generic parameters -- no boilerplate |
 | Non-blocking startup | Cluster probing with timeout ensures app starts even if all brokers are down |
-| AdminClient for health checks | `describeCluster().clusterId()` is lightweight and tests actual broker connectivity |
-| SR on single cluster | Independent clusters have separate `CLUSTER_ID`s; SR's `_schemas` topic lives on one cluster. All producers/consumers share the same SR endpoint via `schema.registry.url` |
-| In-memory idempotency | Sufficient for single-instance; replace `InMemoryIdempotencyStore` with Redis/DB implementation for multi-instance |
+| `KafkaPropertyResolver` 4-layer merge | SSL, SASL, and all Kafka properties propagate consistently to producers, consumers, and AdminClients |
+| Per-cluster property overrides | Different SSL certs or SASL credentials per region via `clusters.{name}.properties.configuration` |
+| SR on single cluster | Independent clusters have separate `CLUSTER_ID`s; SR's `_schemas` topic lives on one cluster. All clients share the same SR endpoint via `schema.registry.url` |
+| `IdempotencyStore` interface | In-memory implementation for single-instance; swap in Redis (`SET NX EX`) or DB for multi-instance |
+| Idempotency key = prefix + topic + message key | Natural deduplication based on business key; no extra headers needed |
 | JDK HttpServer for REST | Zero-dependency HTTP server built into Java -- fits "legacy" philosophy |
 
 ## Tech Stack
 
-- Java 11
+- Java 17
 - Apache Kafka Client 3.6.1
-- Apache Avro 1.11.3
-- Confluent Kafka Avro Serializer 7.6.0
+- Apache Avro 1.12.1
+- Confluent Kafka Avro Serializer 8.2.0
 - Jackson 2.16.1
 - SnakeYAML 2.2
 - SLF4J 2.0.11 + Logback 1.4.14

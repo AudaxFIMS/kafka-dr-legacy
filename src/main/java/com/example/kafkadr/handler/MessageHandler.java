@@ -1,23 +1,29 @@
 package com.example.kafkadr.handler;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+
 /**
- * Type-safe message handler. The generic parameter {@code T} determines the
- * deserialized value type that the handler receives.
+ * Type-safe message handler working directly with Kafka's {@link ConsumerRecord}.
  *
- * <p>The framework resolves {@code T} automatically via reflection from the
- * class hierarchy — no need to override {@code getMessageType()} or similar.
+ * <p>Both key type {@code K} and value type {@code V} are resolved automatically
+ * via reflection — just declare the generic parameters:
  *
- * <p>Content-type mapping (YAML → Java type):
  * <pre>
- *   content-type: string  → MessageHandler&lt;String&gt;
- *   content-type: json    → MessageHandler&lt;JsonNode&gt;   (or any Jackson-deserializable POJO)
- *   content-type: bytes   → MessageHandler&lt;byte[]&gt;
- *   content-type: native  → MessageHandler&lt;PaymentAvro&gt; (Avro/Protobuf generated class)
+ * // String key, JsonNode value
+ * public class ProcessOrder implements MessageHandler&lt;String, JsonNode&gt; {
+ *     public void handle(ConsumerRecord&lt;String, JsonNode&gt; record) {
+ *         String orderId = record.key();
+ *         JsonNode order  = record.value();
+ *         Headers headers = record.headers();
+ *         long timestamp  = record.timestamp();
+ *     }
+ * }
  * </pre>
  *
- * @param <T> the deserialized message value type
+ * @param <K> the key type
+ * @param <V> the value type
  */
-public interface MessageHandler<T> {
+public interface MessageHandler<K, V> {
 
-    void handle(MessageEnvelope<T> message);
+    void handle(ConsumerRecord<K, V> record);
 }

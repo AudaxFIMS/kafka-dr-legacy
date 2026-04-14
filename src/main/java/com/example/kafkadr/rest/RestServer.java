@@ -4,11 +4,10 @@ import com.example.kafkadr.KafkaDrApplication;
 import com.example.kafkadr.avro.PaymentEvent;
 import com.example.kafkadr.avro.PaymentStatus;
 import com.example.kafkadr.cluster.ClusterInfo;
-import com.example.kafkadr.cluster.ClusterState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.kafka.clients.producer.RecordMetadata;
@@ -27,7 +26,6 @@ import java.util.concurrent.Executors;
 
 /**
  * Lightweight REST server built on JDK's HttpServer (zero external dependencies).
- *
  * Endpoints:
  *   GET  /status                  — cluster states, active cluster, idempotency stats
  *   POST /produce/demo-events     — send a string message
@@ -128,33 +126,19 @@ public class RestServer {
         }
 
         String body = readBody(exchange);
-        String idempotencyKey = UUID.randomUUID().toString();
 
         try {
-            RecordMetadata metadata;
+            RecordMetadata metadata = switch (topic) {
+	            case "demo-events" -> produceDemoEvent(body);
+	            case "order-events" -> produceOrderEvent(body);
+	            case "payment-events" -> producePaymentEvent(body);
+	            case "raw-telemetry" -> produceRawTelemetry(body);
+	            default -> app.getProducerManager().send(topic, null, body);
+            };
 
-            switch (topic) {
-                case "demo-events":
-                    metadata = produceDemoEvent(body, idempotencyKey);
-                    break;
-                case "order-events":
-                    metadata = produceOrderEvent(body, idempotencyKey);
-                    break;
-                case "payment-events":
-                    metadata = producePaymentEvent(body, idempotencyKey);
-                    break;
-                case "raw-telemetry":
-                    metadata = produceRawTelemetry(body, idempotencyKey);
-                    break;
-                default:
-                    metadata = app.getProducerManager().send(topic, null, body, idempotencyKey);
-                    break;
-            }
-
-            ObjectNode result = mapper.createObjectNode();
+	        ObjectNode result = mapper.createObjectNode();
             result.put("status", "sent");
             result.put("topic", topic);
-            result.put("idempotencyKey", idempotencyKey);
             result.put("cluster", app.getClusterManager().getActiveCluster().getName());
             if (metadata != null) {
                 result.put("partition", metadata.partition());
@@ -170,27 +154,24 @@ public class RestServer {
 
     // ─── topic-specific producers ───────────────────────────────
 
-    private RecordMetadata produceDemoEvent(String body, String idempotencyKey) {
-        // content-type: string — send body as-is
+    private RecordMetadata produceDemoEvent(String body) {
         String message = body.isEmpty() ? "demo-event-" + System.currentTimeMillis() : body;
-        return app.getProducerManager().send("demo-events", null, message, idempotencyKey);
+        return app.getProducerManager().send("demo-events", null, message);
     }
 
-    private RecordMetadata produceOrderEvent(String body, String idempotencyKey) {
-        // content-type: json — parse or build a default order
+    private RecordMetadata produceOrderEvent(String body) {
         if (body.isEmpty()) {
             Map<String, Object> order = new HashMap<>();
             order.put("orderId", "ORD-" + UUID.randomUUID().toString().substring(0, 8));
             order.put("items", 3);
             order.put("total", 99.95);
             order.put("timestamp", System.currentTimeMillis());
-            return app.getProducerManager().send("order-events", null, order, idempotencyKey);
+            return app.getProducerManager().send("order-events", null, order);
         }
-        return app.getProducerManager().send("order-events", null, body, idempotencyKey);
+        return app.getProducerManager().send("order-events", null, body);
     }
 
-    private RecordMetadata producePaymentEvent(String body, String idempotencyKey) {
-        // content-type: native — build Avro PaymentEvent
+    private RecordMetadata producePaymentEvent(String body) {
         PaymentEvent payment;
         if (body.isEmpty()) {
             payment = PaymentEvent.newBuilder()
@@ -216,15 +197,14 @@ public class RestServer {
                 throw new RuntimeException("Invalid PaymentEvent JSON: " + e.getMessage(), e);
             }
         }
-        return app.getProducerManager().send("payment-events", payment.getPaymentId().toString(), payment, idempotencyKey);
+        return app.getProducerManager().send("payment-events", payment.getPaymentId(), payment);
     }
 
-    private RecordMetadata produceRawTelemetry(String body, String idempotencyKey) {
-        // content-type: bytes
+    private RecordMetadata produceRawTelemetry(String body) {
         byte[] data = body.isEmpty()
                 ? ("telemetry-" + System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8)
                 : body.getBytes(StandardCharsets.UTF_8);
-        return app.getProducerManager().send("raw-telemetry", null, data, idempotencyKey);
+        return app.getProducerManager().send("raw-telemetry", null, data);
     }
 
     // ─── helpers ────────────────────────────────────────────────
