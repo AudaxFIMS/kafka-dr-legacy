@@ -22,7 +22,7 @@
         <snakeyaml.version>2.2</snakeyaml.version>
         <jackson.version>2.16.1</jackson.version>
         <slf4j.version>2.0.11</slf4j.version>
-        <logback.version>1.4.14</logback.version>
+        <log4j.version>2.25.3</log4j.version>
         <confluent.version>8.2.0</confluent.version>
         <avro.version>1.12.1</avro.version>
         <junit.version>5.10.1</junit.version>
@@ -72,16 +72,34 @@
             <version>${confluent.version}</version>
         </dependency>
 
-        <!-- Logging -->
+        <!-- Logging: SLF4J API (force 2.x, override transitive 1.7 from Kafka/Confluent) -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
             <version>${slf4j.version}</version>
         </dependency>
+
+        <!-- Logging: Log4j2 -->
         <dependency>
-            <groupId>ch.qos.logback</groupId>
-            <artifactId>logback-classic</artifactId>
-            <version>${logback.version}</version>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-1.2-api</artifactId>
+            <version>${log4j.version}</version>
+        </dependency>
+        <!-- SLF4J -> Log4j2 bridge (Kafka client and other libs use SLF4J) -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-slf4j2-impl</artifactId>
+            <version>${log4j.version}</version>
         </dependency>
 
         <!-- Test -->

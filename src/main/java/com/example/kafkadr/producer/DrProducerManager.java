@@ -13,6 +13,8 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.errors.*;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,10 +68,22 @@ public class DrProducerManager implements ClusterSwitchListener {
     }
 
     /**
-     * Send a message with resilient error handling.
-     * On cluster-unavailable errors, triggers instant failover via ClusterManager.
+     * Send a message without headers.
      */
     public RecordMetadata send(String topic, String key, Object value) {
+        return send(topic, key, value, null);
+    }
+
+    /**
+     * Send a message with headers and resilient error handling.
+     * On cluster-unavailable errors, triggers instant failover via ClusterManager.
+     *
+     * @param topic   target topic
+     * @param key     message key (used for partitioning and idempotency)
+     * @param value   message value (serialized according to producer's content-type)
+     * @param headers Kafka headers to attach (may be null)
+     */
+    public RecordMetadata send(String topic, String key, Object value, Headers headers) {
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             ClusterInfo cluster = currentCluster;
             if (cluster == null) {
@@ -86,7 +100,9 @@ public class DrProducerManager implements ClusterSwitchListener {
             ContentType contentType = pc != null ? ContentType.fromString(pc.getContentType()) : ContentType.STRING;
             Object serializedValue = MessageSerializer.serialize(value, contentType);
 
-            ProducerRecord<String, Object> record = new ProducerRecord<>(topic, key, serializedValue);
+            ProducerRecord<String, Object> record = (headers != null)
+                    ? new ProducerRecord<>(topic, null, key, serializedValue, headers)
+                    : new ProducerRecord<>(topic, key, serializedValue);
 
             try {
                 Future<RecordMetadata> future = producer.send(record);
