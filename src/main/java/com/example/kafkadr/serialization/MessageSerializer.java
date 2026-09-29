@@ -20,6 +20,11 @@ public class MessageSerializer {
                 return value.toString();
 
             case JSON:
+                // A String that already holds JSON (e.g. a REST request body) is sent as is —
+                // writeValueAsString would encode it a second time as a JSON string literal.
+                if (value instanceof String && isValidJson((String) value)) {
+                    return value;
+                }
                 try {
                     return objectMapper.writeValueAsString(value);
                 } catch (Exception e) {
@@ -36,6 +41,15 @@ public class MessageSerializer {
 
             default:
                 return value;
+        }
+    }
+
+    private static boolean isValidJson(String value) {
+        try {
+            objectMapper.readTree(value);
+            return !value.isBlank();
+        } catch (Exception e) {
+            return false;
         }
     }
 }
