@@ -65,9 +65,10 @@ public class KafkaDrApplication {
         log.info("Startup probe: {}/{} clusters reachable: {}",
                 reachableClusters.size(), config.getClusters().size(), reachableClusters);
 
-        // 3. Provision topics on reachable clusters
+        // 3. Diagnose broker nodes + provision topics on reachable clusters
         for (String name : reachableClusters) {
             ClusterConfig cc = config.getClusters().get(name);
+            KafkaAdminHelper.diagnoseClusterNodes(name, cc.getBootstrapServers(), config, probeTimeoutMs);
             KafkaAdminHelper.provisionTopics(name, cc.getBootstrapServers(), config, probeTimeoutMs);
         }
 

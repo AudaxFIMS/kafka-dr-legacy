@@ -157,23 +157,64 @@ public class DrConsumerManager implements ClusterSwitchListener {
 
         @Override
         public void run() {
+            log.info("Consumer worker creating KafkaConsumer: topic={}, cluster={}",
+                    drConsumerConfig.getTopic(), cluster.getName());
+
             Properties props = buildConsumerProperties(cluster, drConsumerConfig);
-            consumer = new KafkaConsumer<>(props);
+            try {
+                consumer = new KafkaConsumer<>(props);
+            } catch (Exception e) {
+                log.error("Failed to create KafkaConsumer: topic={}, cluster={}: {}",
+                        drConsumerConfig.getTopic(), cluster.getName(), e.getMessage(), e);
+                return;
+            }
             consumer.subscribe(Collections.singletonList(drConsumerConfig.getTopic()));
 
             MessageHandler<?, ?> handler = handlerRegistry.getHandler(drConsumerConfig.getHandler());
             HandlerTypeResolver.ResolvedTypes types = handlerRegistry.getHandlerTypes(drConsumerConfig.getHandler());
 
-            log.info("Consumer worker started: topic={}, key={}<{}>, value={}<{}>, cluster={}",
+            log.info("Consumer worker started: topic={}, key={}<{}>, value={}<{}>, group={}, cluster={}",
                     drConsumerConfig.getTopic(),
                     keyContentType, types.getKeyType().getSimpleName(),
                     valueContentType, types.getValueType().getSimpleName(),
-                    cluster.getName());
+                    drConsumerConfig.getGroup(), cluster.getName());
 
             try {
+                boolean assignmentLogged = false;
+                int pollCount = 0;
                 while (!stopped.get() && running.get()) {
                     try {
+                        pollCount++;
+                        if (pollCount <= 5 || pollCount % 60 == 0) {
+                            log.debug("Consumer poll #{}: topic={}, cluster={}",
+                                    pollCount, drConsumerConfig.getTopic(), cluster.getName());
+                        }
+
+                        long pollStart = System.currentTimeMillis();
                         ConsumerRecords<?, ?> records = consumer.poll(Duration.ofMillis(1000));
+                        long pollMs = System.currentTimeMillis() - pollStart;
+
+                        // Warn if poll took much longer than expected (GC stall, network hang)
+                        if (pollMs > 5000) {
+                            log.warn("Consumer poll took {}ms (expected ~1000ms): topic={}, cluster={}. " +
+                                            "Possible GC pressure or network issue.",
+                                    pollMs, drConsumerConfig.getTopic(), cluster.getName());
+                        }
+
+                        // Log partition assignment once after first successful poll
+                        if (!assignmentLogged) {
+                            var assignment = consumer.assignment();
+                            if (!assignment.isEmpty()) {
+                                log.info("Consumer partition assignment: topic={}, partitions={}, cluster={}",
+                                        drConsumerConfig.getTopic(), assignment, cluster.getName());
+                                assignmentLogged = true;
+                            } else {
+                                log.warn("Consumer has NO partition assignment after poll #{}: topic={}, group={}, cluster={}",
+                                        pollCount, drConsumerConfig.getTopic(),
+                                        drConsumerConfig.getGroup(), cluster.getName());
+                            }
+                        }
+
                         if (records.isEmpty()) continue;
 
                         String keyPrefix = config.getIdempotency().getKeyPrefix();

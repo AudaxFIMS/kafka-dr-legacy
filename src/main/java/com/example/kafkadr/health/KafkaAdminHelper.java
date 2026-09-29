@@ -5,8 +5,12 @@ import com.example.kafkadr.config.KafkaPropertyResolver;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.Node;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.net.InetSocketAddress;
+import java.net.Socket;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -90,6 +94,43 @@ public final class KafkaAdminHelper {
     public static AdminClient createAdminClient(String bootstrapServers, long timeoutMs,
                                                 KafkaDrConfig config, String clusterName) {
         return AdminClient.create(buildAdminProperties(bootstrapServers, timeoutMs, config, clusterName));
+    }
+
+    /**
+     * Diagnostic: discover all broker nodes in a cluster and test TCP connectivity
+     * to each one. Logs results at INFO (reachable) and ERROR (unreachable) level.
+     */
+    public static void diagnoseClusterNodes(String clusterName, String bootstrapServers,
+                                            KafkaDrConfig config, long timeoutMs) {
+        Properties props = buildAdminProperties(bootstrapServers, timeoutMs, config, clusterName);
+
+        try (AdminClient admin = AdminClient.create(props)) {
+            var nodes = admin.describeCluster().nodes().get(timeoutMs, TimeUnit.MILLISECONDS);
+            log.info("Cluster '{}' has {} broker nodes:", clusterName, nodes.size());
+
+            for (Node node : nodes) {
+                String host = node.host();
+                int port = node.port();
+                boolean reachable = testTcpConnect(host, port, (int) timeoutMs);
+                if (reachable) {
+                    log.info("  Broker id={} {}:{} - REACHABLE", node.id(), host, port);
+                } else {
+                    log.error("  Broker id={} {}:{} - UNREACHABLE (consumer coordinator may be here!)",
+                            node.id(), host, port);
+                }
+            }
+        } catch (Exception e) {
+            log.error("Failed to diagnose cluster '{}': {}", clusterName, e.getMessage());
+        }
+    }
+
+    private static boolean testTcpConnect(String host, int port, int timeoutMs) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), timeoutMs);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
