@@ -5,7 +5,10 @@ import com.example.kafkadr.cluster.LateBindingInitializer;
 import com.example.kafkadr.config.ClusterConfig;
 import com.example.kafkadr.config.ConfigLoader;
 import com.example.kafkadr.config.KafkaDrConfig;
+import com.example.kafkadr.consumer.DrConsumerFactory;
 import com.example.kafkadr.consumer.DrConsumerManager;
+import com.example.kafkadr.consumer.GroupInstanceIds;
+import com.example.kafkadr.example.ExampleDrConsumer;
 import com.example.kafkadr.handler.MessageHandlers;
 import com.example.kafkadr.handler.MessageHandlerRegistry;
 import com.example.kafkadr.health.ClusterHealthChecker;
@@ -14,11 +17,13 @@ import com.example.kafkadr.idempotency.IdempotencyStore;
 import com.example.kafkadr.idempotency.InMemoryIdempotencyStore;
 import com.example.kafkadr.producer.DrProducerManager;
 import com.example.kafkadr.rest.RestServer;
+import org.apache.logging.log4j.LogManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 
 /**
@@ -44,10 +49,12 @@ public class KafkaDrApplication {
     private ClusterManager clusterManager;
     private ClusterHealthChecker healthChecker;
     private DrConsumerManager consumerManager;
+    private DrConsumerFactory consumerFactory;
     private DrProducerManager producerManager;
     private IdempotencyStore idempotencyStore;
     private LateBindingInitializer lateInitializer;
     private RestServer restServer;
+    private ExampleDrConsumer exampleConsumer;
 
     public void start(String configPath) {
         log.info("=== Kafka DR Application starting ===");
@@ -79,11 +86,16 @@ public class KafkaDrApplication {
         MessageHandlerRegistry handlerRegistry = new MessageHandlerRegistry();
         MessageHandlers.registerAll(handlerRegistry);
 
-        consumerManager = new DrConsumerManager(config, handlerRegistry, idempotencyStore);
+        // One id registry for all consumers: no two may share a group.instance.id
+        GroupInstanceIds groupInstanceIds = new GroupInstanceIds(config);
+        consumerManager = new DrConsumerManager(config, handlerRegistry, idempotencyStore, groupInstanceIds);
         producerManager = new DrProducerManager(config, clusterManager);
 
         clusterManager.addListener(consumerManager);
         clusterManager.addListener(producerManager);
+
+        // Factory for DR-aware consumers created by application code (own poll loop)
+        consumerFactory = new DrConsumerFactory(clusterManager, config, groupInstanceIds);
 
         // 5. Start health checker — first healthy cluster gets instant election
         healthChecker = new ClusterHealthChecker(clusterManager, config);
@@ -103,15 +115,34 @@ public class KafkaDrApplication {
             log.error("Failed to start REST server", e);
         }
 
+        // 8. Optional demo of an application-owned DR consumer loop:
+        //    -Dexample.consumer.topic=demo-events [-Dexample.consumer.group=example-dr-group]
+        startExampleConsumerIfRequested();
+
         log.info("=== Kafka DR Application started. Waiting for cluster health checks... ===");
+    }
+
+    private void startExampleConsumerIfRequested() {
+        String topic = System.getProperty("example.consumer.topic");
+        if (topic == null || topic.isBlank()) return;
+
+        String group = System.getProperty("example.consumer.group", "example-dr-group");
+        // Own idempotency prefix (= group): DrConsumerManager may consume the same topic with the
+        // same store, and a shared prefix would make the two consumers skip each other's messages.
+        exampleConsumer = new ExampleDrConsumer(consumerFactory, idempotencyStore,
+                group, topic, group, new Properties());
+        exampleConsumer.start();
+        log.info("ExampleDrConsumer enabled: topic={}, group={}", topic, group);
     }
 
     public void stop() {
         log.info("=== Kafka DR Application shutting down ===");
 
         if (restServer != null) restServer.stop();
+        if (exampleConsumer != null) exampleConsumer.close();
         if (lateInitializer != null) lateInitializer.stop();
         if (healthChecker != null) healthChecker.stop();
+        if (clusterManager != null) clusterManager.stop();
         if (consumerManager != null) consumerManager.stopConsumers();
         if (producerManager != null) producerManager.stop();
         if (idempotencyStore != null) idempotencyStore.stop();
@@ -154,6 +185,10 @@ public class KafkaDrApplication {
         return consumerManager;
     }
 
+    public DrConsumerFactory getConsumerFactory() {
+        return consumerFactory;
+    }
+
     public IdempotencyStore getIdempotencyStore() {
         return idempotencyStore;
     }
@@ -165,8 +200,14 @@ public class KafkaDrApplication {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("Shutdown hook triggered");
-            app.stop();
-        }));
+            try {
+                app.stop();
+            } finally {
+                // Log4j's own shutdown hook is disabled (log4j2.xml) so that shutdown logs are not lost;
+                // flush and stop logging only after every component has closed.
+                LogManager.shutdown();
+            }
+        }, "shutdown-hook"));
 
         app.start(configPath);
 

@@ -108,6 +108,15 @@ public class ConfigLoader {
             config.setAutoCreateTopics(Boolean.TRUE.equals(map.get("auto-create-topics")));
         }
 
+        if (map.containsKey("instance-id") && map.get("instance-id") != null) {
+            config.setInstanceId(String.valueOf(map.get("instance-id")));
+        }
+
+        if (map.containsKey("static-membership")) {
+            config.setStaticMembership(!Boolean.FALSE.equals(map.get("static-membership"))
+                    && !"false".equalsIgnoreCase(String.valueOf(map.get("static-membership"))));
+        }
+
         if (map.containsKey("default-consumer-properties")) {
             config.setDefaultConsumerProperties((Map<String, Object>) map.get("default-consumer-properties"));
         }

@@ -6,7 +6,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -18,7 +21,9 @@ class ClusterManagerTest {
     @BeforeEach
     void setUp() {
         config = ConfigLoader.load("kafka-dr.yml");
-        manager = new ClusterManager(config);
+        // Synchronous delivery keeps state-machine tests deterministic;
+        // async delivery is covered by the *Async* tests below.
+        manager = new ClusterManager(config, Runnable::run);
     }
 
     @Test
@@ -182,5 +187,128 @@ class ClusterManagerTest {
         manager.forceUnhealthy("primary"); // already unhealthy — no-op
 
         assertTrue(switches.isEmpty());
+    }
+
+    // ─── Async notification ────────────────────────────────────────
+
+    @Test
+    void asyncNotificationShouldNotBlockCaller() throws Exception {
+        ClusterManager async = new ClusterManager(config);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch entered = new CountDownLatch(1);
+        async.addListener((prev, next) -> {
+            entered.countDown();
+            awaitQuietly(release);
+        });
+
+        try {
+            async.reportHealthy("primary"); // returns although the listener is blocked
+
+            assertEquals("primary", async.getActiveCluster().getName());
+            assertTrue(entered.await(5, TimeUnit.SECONDS), "listener should be invoked on notifier thread");
+        } finally {
+            release.countDown();
+            async.stop();
+        }
+    }
+
+    @Test
+    void asyncSlowListenerShouldNotDelayOthers() throws Exception {
+        ClusterManager async = new ClusterManager(config);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch fastNotified = new CountDownLatch(1);
+        async.addListener((prev, next) -> awaitQuietly(release)); // slow, registered first
+        async.addListener((prev, next) -> fastNotified.countDown());
+
+        try {
+            async.reportHealthy("primary");
+
+            assertTrue(fastNotified.await(5, TimeUnit.SECONDS), "fast listener must not wait for slow one");
+        } finally {
+            release.countDown();
+            async.stop();
+        }
+    }
+
+    @Test
+    void asyncShouldCoalesceSwitchesWhileListenerBusy() throws Exception {
+        ClusterManager async = new ClusterManager(config);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch firstEntered = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
+        List<String> switches = Collections.synchronizedList(new ArrayList<>());
+        async.addListener((prev, next) -> {
+            switches.add((prev != null ? prev.getName() : "null") + "->" + next.getName());
+            firstEntered.countDown();
+            awaitQuietly(release);
+            done.countDown();
+        });
+
+        try {
+            async.reportHealthy("primary");
+            assertTrue(firstEntered.await(5, TimeUnit.SECONDS));
+
+            // While the listener is busy: primary -> secondary -> tertiary
+            for (int i = 0; i < config.getHealthCheck().getRecoveryThreshold(); i++) {
+                async.reportHealthy("secondary");
+                async.reportHealthy("tertiary");
+            }
+            async.forceUnhealthy("primary");
+            async.forceUnhealthy("secondary");
+            assertEquals("tertiary", async.getActiveCluster().getName());
+
+            release.countDown();
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+
+            // Intermediate switch to secondary is skipped
+            assertEquals(List.of("null->primary", "primary->tertiary"), switches);
+        } finally {
+            release.countDown();
+            async.stop();
+        }
+    }
+
+    @Test
+    void asyncShouldSkipSwitchBackToAlreadyDeliveredCluster() throws Exception {
+        ClusterManager async = new ClusterManager(config);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch firstEntered = new CountDownLatch(1);
+        List<String> switches = Collections.synchronizedList(new ArrayList<>());
+        async.addListener((prev, next) -> {
+            switches.add(next.getName());
+            firstEntered.countDown();
+            awaitQuietly(release);
+        });
+
+        try {
+            async.reportHealthy("primary");
+            assertTrue(firstEntered.await(5, TimeUnit.SECONDS));
+
+            // primary -> secondary -> primary while listener is busy
+            for (int i = 0; i < config.getHealthCheck().getRecoveryThreshold(); i++) {
+                async.reportHealthy("secondary");
+            }
+            async.forceUnhealthy("primary");
+            for (int i = 0; i < config.getHealthCheck().getRecoveryThreshold(); i++) {
+                async.reportHealthy("primary");
+            }
+            assertEquals("primary", async.getActiveCluster().getName());
+
+            release.countDown();
+            Thread.sleep(200); // let the drain loop finish
+
+            assertEquals(List.of("primary"), switches, "listener is already on primary — no restart");
+        } finally {
+            release.countDown();
+            async.stop();
+        }
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

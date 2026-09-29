@@ -8,6 +8,7 @@ import com.example.kafkadr.config.KafkaPropertyResolver;
 import com.example.kafkadr.handler.HandlerTypeResolver;
 import com.example.kafkadr.handler.MessageHandler;
 import com.example.kafkadr.handler.MessageHandlerRegistry;
+import com.example.kafkadr.idempotency.IdempotencyKeys;
 import com.example.kafkadr.idempotency.IdempotencyStore;
 import com.example.kafkadr.serialization.ContentType;
 import com.example.kafkadr.serialization.MessageDeserializer;
@@ -38,6 +39,8 @@ public class DrConsumerManager implements ClusterSwitchListener {
     private final KafkaDrConfig config;
     private final MessageHandlerRegistry handlerRegistry;
     private final IdempotencyStore idempotencyStore;
+    /** group.instance.id per consumer config; claimed once, kept across cluster switches. */
+    private final Map<DrConsumerConfig, String> groupInstanceIds = new IdentityHashMap<>();
 
     private final List<ConsumerWorker> activeWorkers = new CopyOnWriteArrayList<>();
     private ExecutorService executorService;
@@ -45,9 +48,22 @@ public class DrConsumerManager implements ClusterSwitchListener {
 
     public DrConsumerManager(KafkaDrConfig config, MessageHandlerRegistry handlerRegistry,
                              IdempotencyStore idempotencyStore) {
+        this(config, handlerRegistry, idempotencyStore, new GroupInstanceIds(config));
+    }
+
+    public DrConsumerManager(KafkaDrConfig config, MessageHandlerRegistry handlerRegistry,
+                             IdempotencyStore idempotencyStore, GroupInstanceIds instanceIds) {
         this.config = config;
         this.handlerRegistry = handlerRegistry;
         this.idempotencyStore = idempotencyStore;
+        if (config.getConsumers() != null) {
+            for (DrConsumerConfig cc : config.getConsumers()) {
+                String id = instanceIds.claim(cc.getGroup(), List.of(cc.getTopic()));
+                if (id != null) {
+                    groupInstanceIds.put(cc, id);
+                }
+            }
+        }
     }
 
     @Override
@@ -114,6 +130,11 @@ public class DrConsumerManager implements ClusterSwitchListener {
                 cluster.getBootstrapServers());
         props.put(ConsumerConfig.GROUP_ID_CONFIG,
                 drConsumerConfig.getGroup());
+        // Static membership: an explicit group.instance.id from YAML wins
+        String instanceId = groupInstanceIds.get(drConsumerConfig);
+        if (instanceId != null && !props.containsKey(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG)) {
+            props.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, instanceId);
+        }
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 
@@ -220,17 +241,18 @@ public class DrConsumerManager implements ClusterSwitchListener {
                         String keyPrefix = config.getIdempotency().getKeyPrefix();
                         records.forEach(record -> {
                             try {
-                                // Deserialize key first — needed for idempotency key
+                                // Deserialize key first — used for the idempotency key fallback
                                 Object key = MessageDeserializer.deserialize(
                                         record.key(), keyContentType, types.getKeyType(),
                                         record.topic(), record.partition(), record.offset());
 
-                                String msgKey = key != null ? key.toString() : "";
-                                String idempotencyKey = keyPrefix + ":" + record.topic() + ":" + msgKey;
+                                // message-id header, else record key; null → cannot deduplicate
+                                String idempotencyKey = IdempotencyKeys.of(
+                                        keyPrefix, record.topic(), record.headers(), key);
 
-                                if (idempotencyStore.isDuplicate(idempotencyKey)) {
-                                    log.debug("Skipping duplicate: topic={}, partition={}, offset={}, key={}",
-                                            record.topic(), record.partition(), record.offset(), msgKey);
+                                if (idempotencyKey != null && idempotencyStore.isProcessed(idempotencyKey)) {
+                                    log.debug("Skipping duplicate: topic={}, partition={}, offset={}, idempotencyKey={}",
+                                            record.topic(), record.partition(), record.offset(), idempotencyKey);
                                     return;
                                 }
 
@@ -239,7 +261,11 @@ public class DrConsumerManager implements ClusterSwitchListener {
                                         record.topic(), record.partition(), record.offset());
 
                                 dispatchTyped(handler, record, key, value);
-                                idempotencyStore.markProcessed(idempotencyKey);
+
+                                // Mark only after successful handling — a failed record is not treated as processed
+                                if (idempotencyKey != null) {
+                                    idempotencyStore.markProcessed(idempotencyKey);
+                                }
                             } catch (Exception e) {
                                 log.error("Error processing message: topic={}, partition={}, offset={}",
                                         record.topic(), record.partition(), record.offset(), e);

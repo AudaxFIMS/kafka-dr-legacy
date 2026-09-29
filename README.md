@@ -41,8 +41,10 @@ No Spring Boot, no Spring Cloud Stream -- plain Java 17 with the Kafka client li
 - **Automatic failback** -- returns to the highest-priority healthy cluster when it recovers
 - **Instant first election** -- all clusters start as UNHEALTHY; first successful health check triggers immediate election without waiting for recovery threshold
 - **Synchronous send with ACK** -- `sync: true` + `acks: all` ensures broker acknowledgement before returning
+- **Asynchronous switch notifications** -- listeners are notified on a background pool with a per-listener serial queue; a slow listener never blocks health checks, producers, or other listeners; switches that happen while a listener is busy are coalesced
 - **Consumer binding management** -- only the active cluster's consumers are running; they are stopped and recreated on switch
-- **Idempotent message processing** -- pluggable deduplication (`IdempotencyStore` interface) with in-memory TTL implementation; key format: `{prefix}:{topic}:{message_key}`
+- **DR-aware consumer for your own poll loop** -- `DrKafkaConsumer` keeps the familiar `subscribe → poll → commit` API and transparently moves to the new active cluster
+- **Idempotent message processing** -- pluggable deduplication (`IdempotencyStore` interface) with in-memory TTL implementation; key format: `{prefix}:{topic}:{id}`; every produced message carries a `message-id` header that survives cross-cluster replication
 - **Multi-format support** -- String, JSON, Avro, and raw bytes payloads with per-topic configuration
 - **Type-safe handlers** -- `MessageHandler<K, V>` works directly with `ConsumerRecord<K, V>`; both key and value types resolved automatically via reflection
 - **Configurable key types** -- `key-content-type` per consumer for typed key deserialization (string, json, bytes, native)
@@ -70,7 +72,7 @@ src/main/
       IdempotencyConfig.java               # Idempotency tuning
       LateInitializerConfig.java           # Late initializer tuning
     cluster/
-      ClusterManager.java                  # Failover engine (election, forceUnhealthy, failback)
+      ClusterManager.java                  # Failover engine (election, forceUnhealthy, failback, async notifications)
       ClusterInfo.java                     # Runtime cluster state + health counters
       ClusterState.java                    # HEALTHY | UNHEALTHY | UNKNOWN
       ClusterSwitchListener.java           # Observer interface for failover events
@@ -79,9 +81,11 @@ src/main/
       ClusterHealthChecker.java            # Periodic AdminClient health probe
       KafkaAdminHelper.java                # Shared utilities (probe, topic provisioning)
     consumer/
-      DrConsumerManager.java               # Consumer lifecycle across cluster switches
+      DrConsumerManager.java               # Consumer lifecycle across cluster switches (YAML-configured handlers)
+      DrKafkaConsumer.java                 # DR-aware KafkaConsumer replacement for your own poll loop
+      DrConsumerFactory.java               # Creates DrKafkaConsumer instances
     producer/
-      DrProducerManager.java               # Resilient send with error classification + retry
+      DrProducerManager.java               # Resilient send with error classification, retry, message-id header
       SendOutcome.java                     # Error classification enum
     handler/
       MessageHandler.java                  # Generic handler: MessageHandler<K, V>
@@ -91,14 +95,18 @@ src/main/
     idempotency/
       IdempotencyStore.java                # Interface (swap in Redis/DB implementation)
       InMemoryIdempotencyStore.java        # ConcurrentHashMap with TTL eviction
+      IdempotencyKeys.java                 # Cluster-independent dedup keys (message-id header / record key)
     serialization/
       ContentType.java                     # STRING | JSON | BYTES | NATIVE
       MessageDeserializer.java             # Content-type + target-type deserialization
       MessageSerializer.java               # Content-type serialization
     rest/
       RestServer.java                      # JDK HttpServer REST API
+    example/
+      ExampleDrConsumer.java               # Template: own poll loop on DrKafkaConsumer + dedup + per-record commit
   resources/
     kafka-dr.yml                           # All configuration in one place
+    log4j2.xml                             # Logging configuration
 docker-compose.yml                         # 3 Kafka clusters + Schema Registry + Kafka UI
 scripts/e2e-test.sh                        # End-to-end test script
 ```
@@ -117,10 +125,15 @@ scripts/e2e-test.sh                        # End-to-end test script
 # 1. Start infrastructure
 docker compose up -d
 
-# 2. Build and run
+# 2. Build and run (self-contained jar with all dependencies, built by maven-shade-plugin)
 mvn clean package -DskipTests
 java -jar target/kafka-dr-legacy-1.0.0-SNAPSHOT.jar
+
+# Optional: also start the example application-owned DR consumer
+java -Dexample.consumer.topic=demo-events -jar target/kafka-dr-legacy-1.0.0-SNAPSHOT.jar
 ```
+
+On shutdown (Ctrl+C / SIGTERM) all components are closed first, then logging is flushed -- Log4j's own shutdown hook is disabled in `log4j2.xml` so the final shutdown logs are not lost.
 
 ### Test All Payload Types
 
@@ -319,6 +332,26 @@ kafka-dr:
     timeout-ms: 3000          # Probe timeout for unreachable clusters
 ```
 
+### Consumer Static Membership
+
+```yaml
+kafka-dr:
+  instance-id: ${KAFKA_DR_INSTANCE_ID:}                   # empty → hostname
+  static-membership: ${KAFKA_DR_STATIC_MEMBERSHIP:true}
+```
+
+Every consumer (`DrConsumerManager` workers and `DrKafkaConsumer`) gets `group.instance.id = {instance-id}-{group}-{topics}` -- the same id on every cluster.
+
+Why: when a cluster dies, its consumers are closed without being able to leave the group. When the cluster comes back (failback), the broker keeps those dead members until `session.timeout.ms` (45s by default) and new consumers get **no partitions** meanwhile. A static member rejoining with the same id replaces its old registration immediately. Measured on the docker-compose setup: failback from switch to partition assignment **~1s** (vs ~29s with dynamic membership); app restart ~1s.
+
+Rules and trade-offs:
+
+- `instance-id` must be **unique per running application instance** and **stable across restarts** (hostname, StatefulSet pod name, `KAFKA_DR_INSTANCE_ID`). A Deployment pod name changes on restart -- still correct, just no fast rejoin after restarts.
+- Two live consumers with the same id fence each other (`FencedInstanceIdException`). Inside one process ids are claimed; a duplicate (same group + topics twice) falls back to dynamic membership with a WARN. Across instances this is guaranteed only by a unique `instance-id`.
+- An explicit `group.instance.id` in per-consumer properties (YAML or `DrKafkaConsumer` props) is kept as is. Do not put it into `default-consumer-properties` -- all consumers would share it.
+- Static members do not leave the group on shutdown. For a single instance that is what makes restart fast; when an instance is removed for good (scale-down), its partitions are reassigned only after `session.timeout.ms`.
+- Disable with `KAFKA_DR_STATIC_MEMBERSHIP=false`.
+
 ### Idempotency
 
 ```yaml
@@ -328,11 +361,29 @@ kafka-dr:
     key-prefix: idempotency   # Prefix for deduplication keys
 ```
 
-Idempotency key format: `{key-prefix}:{topic}:{message_key}`
+Idempotency key format: `{key-prefix}:{topic}:{id}`, where `id` is (via `IdempotencyKeys.of`):
 
-Example: `idempotency:order-events:ORD-001`
+1. the `message-id` header -- `DrProducerManager` adds a UUID to every message (generated once per `send`, so retries and failover resends carry the same id);
+2. otherwise the record key (`byte[]` keys are Base64-encoded);
+3. otherwise `null` -- the record cannot be deduplicated.
 
-The `IdempotencyStore` interface can be swapped for a Redis or DB implementation for multi-instance deployments.
+Example: `idempotency:order-events:3f1c2a9e-...`
+
+Partition and offset are never part of the key: they differ between replicated clusters, while headers, key and value are preserved by MirrorMaker 2 / Cluster Linking.
+
+`IdempotencyStore` API:
+
+| Method | Semantics |
+|---|---|
+| `isProcessed(key)` | Read-only check; use in your own loop **before** processing |
+| `markProcessed(key)` | Call **after** successful processing |
+| `isDuplicate(key)` | Legacy check-and-mark in one call -- marks the key even if processing later fails; prefer the two calls above |
+
+Both `DrConsumerManager` (YAML-configured handlers) and `DrKafkaConsumer` loops use `IdempotencyKeys` + `isProcessed`/`markProcessed`. In `DrConsumerManager` the fallback key is the *deserialized* record key (per `key-content-type`); records with neither a `message-id` header nor a key are processed without deduplication.
+
+`ttl-seconds` must cover the whole window in which re-reads are possible: failure detection time + consumer offset sync lag between clusters.
+
+The in-memory store works per instance. For multi-instance deployments swap in a Redis or DB implementation -- after failover, partitions may be assigned to a different instance.
 
 ## Adding Business Logic
 
@@ -384,6 +435,83 @@ kafka-dr:
 ```java
 producerManager.send("order-events", "ORD-001", orderData);
 ```
+
+### Own Consumer Loop (`DrKafkaConsumer`)
+
+If your code already has a plain `KafkaConsumer` loop with its own topic/group parameters, replace `new KafkaConsumer<>(props)` with the DR factory -- the rest of the loop stays the same:
+
+```java
+DrConsumerFactory factory = app.getConsumerFactory();
+
+Properties props = new Properties();
+props.put(ConsumerConfig.GROUP_ID_CONFIG, "legacy-order-group");
+props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+// bootstrap.servers and SSL/SASL come from kafka-dr.yml
+
+try (DrKafkaConsumer<String, String> consumer = factory.create(props)) {
+    consumer.subscribe(List.of("order-events"));
+    while (running) {
+        for (ConsumerRecord<String, String> r : consumer.poll(Duration.ofSeconds(1))) {
+            String dedupKey = IdempotencyKeys.of(keyPrefix, r);
+            if (dedupKey != null && idempotencyStore.isProcessed(dedupKey)) {
+                continue;                                   // re-read after failover
+            }
+            if (process(r)) {
+                if (dedupKey != null) idempotencyStore.markProcessed(dedupKey);
+                consumer.commitAsync(Map.of(
+                        new TopicPartition(r.topic(), r.partition()),
+                        new OffsetAndMetadata(r.offset() + 1)), null);
+            }
+            // failure: record is skipped
+        }
+    }
+}
+```
+
+A complete template is in `example/ExampleDrConsumer.java` (own thread, graceful `close()`, overridable `process()`).
+
+Run it inside the app with a system property (disabled by default):
+
+```bash
+java -Dexample.consumer.topic=demo-events [-Dexample.consumer.group=example-dr-group] ...
+```
+
+The example uses its group name as the idempotency prefix. `DrConsumerManager` also consumes `demo-events` with the same `IdempotencyStore`; with a shared prefix the two consumers would skip each other's messages -- give every independent consumer its own prefix.
+
+Unit tests without Kafka: pass a `MockConsumer` to the factory -- `new DrConsumerFactory(clusterManager, config, props -> new MockConsumer<>(OffsetResetStrategy.EARLIEST))` with `new ClusterManager(config, Runnable::run)` for synchronous switches (see `ExampleDrConsumerTest`).
+
+Rules:
+
+- **Properties** -- merged as `default-properties → cluster → default-consumer-properties → your props`; `bootstrap.servers` is always taken from the active cluster.
+- **Deserializers as class names, not instances** -- `KafkaConsumer.close()` closes deserializer instances, and the consumer is recreated on every switch.
+- **Single thread** -- like `KafkaConsumer`, use one `DrKafkaConsumer` from one thread.
+- **Commit per record, not `commitAsync()` without arguments** -- the no-arg form commits the position after the *whole* polled batch; if the cluster fails mid-batch, the unprocessed tail is committed and (after offset translation) skipped on the failover cluster.
+
+What happens on failover:
+
+```
+1. ClusterManager elects the new cluster; DrKafkaConsumer only records the target
+   and calls wakeup() (KafkaConsumer is not thread-safe)
+2. Your thread: the current poll()/commitSync() is interrupted by the wakeup;
+   in-flight commitAsync() calls to the dead cluster fail quietly (DEBUG log)
+3. Inside poll(): old consumer closed (1s), new one created on the new cluster,
+   same subscription -- this poll returns empty records
+4. Next polls: join the group on the new cluster, read from its committed offsets;
+   records re-read because of offset-sync lag are skipped by isProcessed()
+```
+
+Safety guarantees of the wrapper:
+
+| Situation | Behavior |
+|---|---|
+| `commitAsync(Map)` with offsets polled before the switch | Dropped with WARN -- offsets of one cluster are meaningless on another |
+| `commitAsync()` / `commitSync()` right after the switch | Safe -- the new consumer has no positions yet |
+| `commitSync()` interrupted by a switch | Does not throw; commit is skipped |
+| Rebalance listener during a switch | `onPartitionsLost` instead of `onPartitionsRevoked` (no commits to a dead cluster) |
+| Your own `wakeup()` | Propagated as `WakeupException`, as with `KafkaConsumer` |
+| No active cluster yet | `poll()` returns empty records |
 
 ### Handler Examples
 
@@ -448,10 +576,11 @@ Primary goes down:
   2. ClusterManager.forceUnhealthy("primary")
      - Bypasses failure threshold
      - Sets state to UNHEALTHY immediately
-  3. reelectActive() -> picks "secondary" (priority=2)
-  4. ClusterSwitchListener notifications:
+  3. reelectActive() -> picks "secondary" (priority=2); getActiveCluster() changes immediately
+  4. ClusterSwitchListener notifications (asynchronous, each listener in its own serial queue):
      - DrConsumerManager: stop primary consumers, start secondary consumers
-     - DrProducerManager: close primary producers, create secondary producers
+     - DrProducerManager: create secondary producers, swap, close primary producers
+     - DrKafkaConsumer:   wakeup -> recreated on secondary inside the owner's poll()
   5. Next producer.send() goes to secondary
 
 Primary recovers:
@@ -459,6 +588,16 @@ Primary recovers:
   2. reelectActive() -> picks "primary" (priority=1, healthy again)
   3. Consumers and producers switch back automatically
 ```
+
+### Switch Notifications
+
+`ClusterManager` never calls listeners on the caller's thread. Health checks and `forceUnhealthy()` return immediately; listeners run on the `cluster-switch-notifier-N` daemon pool:
+
+- **Per-listener serial queue** -- events for one listener are delivered in order, never concurrently.
+- **Isolation** -- a slow listener (e.g. `DrConsumerManager` stopping consumers, up to 10s) does not delay others.
+- **Coalescing** -- if more switches happen while a listener is busy, it receives only the latest target: `primary → secondary → tertiary` is delivered as `primary → tertiary`; `primary → secondary → primary` is not delivered at all (the listener is already on primary).
+- A listener added after the initial election is notified only about subsequent switches -- read `getActiveCluster()` for the current state (`DrKafkaConsumer` does this).
+- For tests, pass a synchronous executor: `new ClusterManager(config, Runnable::run)`.
 
 ### Late Cluster Initialization
 
@@ -476,8 +615,10 @@ Primary recovers:
 | Error type | Examples | Behavior |
 |---|---|---|
 | **Serialization** | `SerializationException` | Fatal -- throw immediately, no retry or failover |
-| **Cluster unavailable** | `TimeoutException`, `NetworkException`, `DisconnectException`, `BrokerNotAvailableException`, `ConnectException` | Immediate `forceUnhealthy()` + failover to next cluster |
+| **Cluster unavailable** | `TimeoutException`, `NetworkException`, `DisconnectException`, `BrokerNotAvailableException`, `NotLeaderOrFollowerException`, `ConnectException` | Immediate `forceUnhealthy()`, wait (up to 10s) until producers are recreated on the next cluster, resend there; fails immediately if no healthy cluster is left |
 | **Transient** | Any other exception | Retry up to `failure-threshold` times, then `forceUnhealthy()` + failover |
+
+On switch, new producers are created *before* the old ones are closed and swapped in atomically, so concurrent `send()` calls never see an empty producer map. Resends after failover carry the same `message-id` header.
 
 ## REST API
 
@@ -535,7 +676,10 @@ Built-in HTTP server on port 8088 (configurable via `REST_PORT` env var or `-Dre
 | Per-cluster property overrides | Different SSL certs or SASL credentials per region via `clusters.{name}.properties.configuration` |
 | SR on single cluster | Independent clusters have separate `CLUSTER_ID`s; SR's `_schemas` topic lives on one cluster. All clients share the same SR endpoint via `schema.registry.url` |
 | `IdempotencyStore` interface | In-memory implementation for single-instance; swap in Redis (`SET NX EX`) or DB for multi-instance |
-| Idempotency key = prefix + topic + message key | Natural deduplication based on business key; no extra headers needed |
+| Idempotency key = prefix + topic + `message-id` header | Stable across replicated clusters (unlike partition/offset); falls back to the record key |
+| Asynchronous, per-listener notifications | Failover detection is never blocked by slow listeners; coalescing avoids needless consumer restarts |
+| `DrKafkaConsumer` switches inside `poll()` | `KafkaConsumer` is single-threaded; the switch thread only signals via `wakeup()` |
+| Static membership (`group.instance.id`) | Consumers closed on a dead cluster cannot leave their group; on failback a static member replaces its dead registration instantly instead of waiting `session.timeout.ms` |
 | JDK HttpServer for REST | Zero-dependency HTTP server built into Java -- fits "legacy" philosophy |
 
 ## Tech Stack
@@ -546,7 +690,7 @@ Built-in HTTP server on port 8088 (configurable via `REST_PORT` env var or `-Dre
 - Confluent Kafka Avro Serializer 8.2.0
 - Jackson 2.16.1
 - SnakeYAML 2.2
-- SLF4J 2.0.11 + Logback 1.4.14
+- SLF4J 2.0.11 + Log4j2 2.25.3
 - JUnit 5.10.1 + Mockito 5.8.0
 
 ## Infrastructure (Docker Compose)

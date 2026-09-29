@@ -139,7 +139,8 @@ public class RestServer {
 	        ObjectNode result = mapper.createObjectNode();
             result.put("status", "sent");
             result.put("topic", topic);
-            result.put("cluster", app.getClusterManager().getActiveCluster().getName());
+            ClusterInfo sentTo = app.getProducerManager().getCurrentCluster();
+            result.put("cluster", sentTo != null ? sentTo.getName() : null);
             if (metadata != null) {
                 result.put("partition", metadata.partition());
                 result.put("offset", metadata.offset());

@@ -29,6 +29,15 @@ kafka-dr:
 
   auto-create-topics: true
 
+  # ─── Consumer static membership ───────────────────────────────────────────
+  # Consumers get group.instance.id = {instance-id}-{group}-{topic}. On failback, a
+  # consumer rejoining a cluster where its old member died replaces it immediately
+  # instead of waiting session.timeout.ms (45s by default) for partitions.
+  # instance-id must be unique per running app instance and stable across restarts
+  # (e.g. StatefulSet pod name). Empty → hostname.
+  instance-id: ${KAFKA_DR_INSTANCE_ID:}
+  static-membership: ${KAFKA_DR_STATIC_MEMBERSHIP:true}
+
   # ─── Default consumer properties (merged on top of default-properties) ─────
   default-consumer-properties:
     configuration:

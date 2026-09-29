@@ -60,6 +60,12 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
+    public boolean isProcessed(String key) {
+        Long timestamp = processedKeys.get(key);
+        return timestamp != null && System.currentTimeMillis() - timestamp < ttlMillis;
+    }
+
+    @Override
     public void markProcessed(String key) {
         processedKeys.put(key, System.currentTimeMillis());
     }

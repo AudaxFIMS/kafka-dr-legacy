@@ -23,6 +23,13 @@ public interface IdempotencyStore {
     boolean isDuplicate(String key);
 
     /**
+     * Read-only check: was the message already marked as processed (within TTL)?
+     * Unlike {@link #isDuplicate(String)}, does not record the key — call
+     * {@link #markProcessed(String)} after successful processing.
+     */
+    boolean isProcessed(String key);
+
+    /**
      * Mark a message as successfully processed.
      */
     void markProcessed(String key);

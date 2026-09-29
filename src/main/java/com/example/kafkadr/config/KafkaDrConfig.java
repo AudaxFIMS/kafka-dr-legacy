@@ -11,6 +11,8 @@ public class KafkaDrConfig {
 
     private Map<String, Object> defaultProperties = new LinkedHashMap<>();
     private boolean autoCreateTopics;
+    private String instanceId;
+    private boolean staticMembership = true;
     private Map<String, Object> defaultConsumerProperties = new LinkedHashMap<>();
     private Map<String, Object> defaultProducerProperties = new LinkedHashMap<>();
     private Map<String, ClusterConfig> clusters = new LinkedHashMap<>();
@@ -34,6 +36,27 @@ public class KafkaDrConfig {
 
     public void setAutoCreateTopics(boolean autoCreateTopics) {
         this.autoCreateTopics = autoCreateTopics;
+    }
+
+    /**
+     * Stable id of this application instance (prefix of consumer {@code group.instance.id}).
+     * Blank → hostname.
+     */
+    public String getInstanceId() {
+        return instanceId;
+    }
+
+    public void setInstanceId(String instanceId) {
+        this.instanceId = instanceId;
+    }
+
+    /** Use Kafka static membership ({@code group.instance.id}) for DR consumers. Default: true. */
+    public boolean isStaticMembership() {
+        return staticMembership;
+    }
+
+    public void setStaticMembership(boolean staticMembership) {
+        this.staticMembership = staticMembership;
     }
 
     public Map<String, Object> getDefaultConsumerProperties() {

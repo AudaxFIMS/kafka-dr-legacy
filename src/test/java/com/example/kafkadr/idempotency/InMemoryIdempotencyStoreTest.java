@@ -67,6 +67,30 @@ class InMemoryIdempotencyStoreTest {
     }
 
     @Test
+    void isProcessedShouldNotRecordKey() {
+        String key = "test:order-events:ORD-100";
+        assertFalse(store.isProcessed(key));
+        assertFalse(store.isProcessed(key)); // check alone never marks
+        assertEquals(0, store.size());
+
+        store.markProcessed(key);
+        assertTrue(store.isProcessed(key));
+    }
+
+    @Test
+    void isProcessedShouldRespectTtl() {
+        IdempotencyConfig config = new IdempotencyConfig();
+        config.setTtlSeconds(0);
+        IdempotencyStore shortTtlStore = new InMemoryIdempotencyStore(config);
+        try {
+            shortTtlStore.markProcessed("k");
+            assertFalse(shortTtlStore.isProcessed("k"));
+        } finally {
+            shortTtlStore.stop();
+        }
+    }
+
+    @Test
     void shouldHandleTtlExpiration() {
         IdempotencyConfig config = new IdempotencyConfig();
         config.setTtlSeconds(0);

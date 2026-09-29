@@ -8,6 +8,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -21,6 +26,16 @@ import java.util.stream.Collectors;
  *   <li>{@link #forceUnhealthy(String)} enables instant failover from the producer on send errors</li>
  *   <li>Higher-priority cluster automatically triggers failback when it recovers</li>
  * </ul>
+ *
+ * <p>Listener notification is <b>asynchronous</b>: {@link #getActiveCluster()} changes
+ * immediately, while {@link ClusterSwitchListener}s are notified on a notifier pool.
+ * Each listener has its own serial queue, so:
+ * <ul>
+ *   <li>callers of {@code reportHealthy/reportUnhealthy/forceUnhealthy} never wait for listeners</li>
+ *   <li>a slow listener (e.g. stopping consumers) does not delay the others</li>
+ *   <li>events for one listener are delivered in order; switches that happen while the
+ *       listener is still busy are coalesced — it receives only the latest target</li>
+ * </ul>
  */
 public class ClusterManager {
 
@@ -29,12 +44,36 @@ public class ClusterManager {
     private final List<ClusterInfo> clusters;
     private final int failureThreshold;
     private final int recoveryThreshold;
-    private final List<ClusterSwitchListener> listeners = new CopyOnWriteArrayList<>();
+    private final List<ListenerDispatcher> dispatchers = new CopyOnWriteArrayList<>();
+    private final Executor notificationExecutor;
+    private final ExecutorService ownedNotificationPool;
 
     private volatile ClusterInfo activeCluster;
     private volatile boolean initialElectionDone = false;
 
     public ClusterManager(KafkaDrConfig config) {
+        this(config, null);
+    }
+
+    /**
+     * @param notificationExecutor executor used to notify listeners; {@code null} creates an
+     *                             internal daemon pool. Pass {@code Runnable::run} for
+     *                             synchronous delivery (tests).
+     */
+    public ClusterManager(KafkaDrConfig config, Executor notificationExecutor) {
+        if (notificationExecutor == null) {
+            AtomicInteger threadCounter = new AtomicInteger();
+            this.ownedNotificationPool = Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "cluster-switch-notifier-" + threadCounter.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            });
+            this.notificationExecutor = ownedNotificationPool;
+        } else {
+            this.ownedNotificationPool = null;
+            this.notificationExecutor = notificationExecutor;
+        }
+
         this.failureThreshold = config.getHealthCheck().getFailureThreshold();
         this.recoveryThreshold = config.getHealthCheck().getRecoveryThreshold();
 
@@ -55,11 +94,20 @@ public class ClusterManager {
     }
 
     public void addListener(ClusterSwitchListener listener) {
-        listeners.add(listener);
+        dispatchers.add(new ListenerDispatcher(listener));
     }
 
     public void removeListener(ClusterSwitchListener listener) {
-        listeners.remove(listener);
+        dispatchers.removeIf(d -> d.listener == listener);
+    }
+
+    /**
+     * Stop the internal notifier pool (if owned). Pending notifications are dropped.
+     */
+    public void stop() {
+        if (ownedNotificationPool != null) {
+            ownedNotificationPool.shutdownNow();
+        }
     }
 
     public ClusterInfo getActiveCluster() {
@@ -178,7 +226,7 @@ public class ClusterManager {
     }
 
     /**
-     * Switch to a specific cluster and notify all listeners.
+     * Switch to a specific cluster and schedule listener notifications.
      */
     private void switchTo(ClusterInfo newCluster) {
         ClusterInfo previous = this.activeCluster;
@@ -188,12 +236,8 @@ public class ClusterManager {
         log.info(">>> CLUSTER SWITCH: {} -> {} (bootstrap: {}) <<<",
                 prevName, newCluster.getName(), newCluster.getBootstrapServers());
 
-        for (ClusterSwitchListener listener : listeners) {
-            try {
-                listener.onClusterSwitch(previous, newCluster);
-            } catch (Exception e) {
-                log.error("Error in ClusterSwitchListener: {}", listener.getClass().getSimpleName(), e);
-            }
+        for (ListenerDispatcher dispatcher : dispatchers) {
+            dispatcher.submit(newCluster);
         }
     }
 
@@ -202,5 +246,73 @@ public class ClusterManager {
                 .filter(c -> c.getName().equals(name))
                 .findFirst()
                 .orElse(null);
+    }
+
+    /**
+     * Serial, coalescing delivery of switch events to one listener.
+     * At most one drain task per listener runs at a time; while it runs, newer
+     * targets overwrite {@code pendingTarget}, so a busy listener only sees the latest one.
+     */
+    private final class ListenerDispatcher {
+
+        private final ClusterSwitchListener listener;
+        private final Object lock = new Object();
+        private ClusterInfo pendingTarget;
+        private ClusterInfo delivered;
+        private boolean draining;
+
+        ListenerDispatcher(ClusterSwitchListener listener) {
+            this.listener = listener;
+        }
+
+        void submit(ClusterInfo target) {
+            synchronized (lock) {
+                pendingTarget = target;
+                if (draining) return;
+                draining = true;
+            }
+            try {
+                notificationExecutor.execute(this::drain);
+            } catch (RejectedExecutionException e) {
+                synchronized (lock) {
+                    draining = false;
+                }
+                log.warn("Switch notification to {} rejected (notifier stopped)", listenerName());
+            }
+        }
+
+        private void drain() {
+            while (true) {
+                ClusterInfo target;
+                ClusterInfo previous;
+                synchronized (lock) {
+                    target = pendingTarget;
+                    pendingTarget = null;
+                    if (target == null) {
+                        draining = false;
+                        return;
+                    }
+                    previous = delivered;
+                }
+
+                if (previous != null && previous.getName().equals(target.getName())) {
+                    log.debug("Coalesced switch for {}: already on '{}'", listenerName(), target.getName());
+                    continue;
+                }
+
+                try {
+                    listener.onClusterSwitch(previous, target);
+                } catch (Exception e) {
+                    log.error("Error in ClusterSwitchListener: {}", listenerName(), e);
+                }
+                synchronized (lock) {
+                    delivered = target;
+                }
+            }
+        }
+
+        private String listenerName() {
+            return listener.getClass().getSimpleName();
+        }
     }
 }
