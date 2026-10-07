@@ -60,7 +60,8 @@ src/main/
   avro/
     PaymentEvent.avsc                      # Avro schema (generates Java class)
   java/com/example/kafkadr/
-    KafkaDrApplication.java                # Entry point, resilient startup orchestration
+    KafkaDrApplication.java                # Entry point: KafkaDrRuntime + YAML consumers + REST
+    KafkaDrRuntime.java                    # Embeddable DR core: clusters, health checks, factory, producer
     config/
       ConfigLoader.java                    # YAML parsing with ${ENV:default} substitution
       KafkaDrConfig.java                   # Root configuration model
@@ -436,12 +437,29 @@ kafka-dr:
 producerManager.send("order-events", "ORD-001", orderData);
 ```
 
+### Embedding in Another Application (`KafkaDrRuntime`)
+
+`KafkaDrRuntime` holds the DR core without REST or YAML consumers: `ClusterManager`, health checks, `IdempotencyStore`, `DrConsumerFactory`, `DrProducerManager`. Create **one per process** (e.g. a lazy singleton in your component registry) -- its `GroupInstanceIds` keeps `group.instance.id` unique across all consumers.
+
+```java
+KafkaDrRuntime dr = KafkaDrRuntime.start("kafka-dr.yml");   // config from the classpath
+
+ExampleDrConsumer consumer = new ExampleDrConsumer(dr.getConsumerFactory(), dr.getIdempotencyStore(),
+        "legacy-order-group", "order-events", "legacy-order-group", new Properties());
+consumer.start();
+...
+consumer.close();   // own consumers first
+dr.close();         // then the runtime
+```
+
+Topic provisioning (startup probe + `LateBindingInitializer`) runs only with `auto-create-topics: true`; set it to `false` when topics are managed outside the app. A `ClusterSwitchListener` that must see the first election is registered between `new KafkaDrRuntime(config)` and `start()` (as `KafkaDrApplication` does for `DrConsumerManager`).
+
 ### Own Consumer Loop (`DrKafkaConsumer`)
 
 If your code already has a plain `KafkaConsumer` loop with its own topic/group parameters, replace `new KafkaConsumer<>(props)` with the DR factory -- the rest of the loop stays the same:
 
 ```java
-DrConsumerFactory factory = app.getConsumerFactory();
+DrConsumerFactory factory = dr.getConsumerFactory();   // or app.getConsumerFactory()
 
 Properties props = new Properties();
 props.put(ConsumerConfig.GROUP_ID_CONFIG, "legacy-order-group");
@@ -553,10 +571,10 @@ public class ProcessSensor implements MessageHandler<Long, JsonNode> {
 
 ```
 1. ConfigLoader parses kafka-dr.yml with environment variable substitution
-2. KafkaDrApplication probes all clusters (3s timeout each, non-blocking)
-3. Reachable clusters: topics provisioned immediately
-4. Unreachable clusters: logged as WARNING, skipped
-5. ClusterManager initializes all clusters as UNHEALTHY
+2. KafkaDrRuntime builds components; ClusterManager initializes all clusters as UNHEALTHY
+3. KafkaDrRuntime.start() probes all clusters (3s timeout each) if auto-create-topics is on
+4. Reachable clusters: topics provisioned immediately
+5. Unreachable clusters: logged as WARNING, skipped
 6. ClusterHealthChecker starts -- probes every 5s
 7. First successful health check: instant election (no recovery threshold)
 8. ClusterSwitchListener -> consumers started, producers created on elected cluster
