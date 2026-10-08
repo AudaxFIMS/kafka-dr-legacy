@@ -15,6 +15,7 @@ import com.example.kafkadr.producer.DrProducerManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
@@ -31,13 +32,17 @@ import java.util.Set;
  * <ol>
  *   <li>constructor — builds components, nothing is started;</li>
  *   <li>{@link #start()} — provisions topics if {@code auto-create-topics} is enabled, then starts
- *       health checks; the first healthy cluster becomes active;</li>
+ *       health checks; the first healthy cluster becomes active asynchronously
+ *       ({@link #awaitReady(Duration)} waits for it);</li>
  *   <li>{@link #close()} — stops switching and releases resources. Close application-owned
  *       consumers first.</li>
  * </ol>
  *
  * <pre>
  * KafkaDrRuntime dr = KafkaDrRuntime.start("kafka-dr.yml");
+ * if (!dr.awaitReady(Duration.ofSeconds(15))) {
+ *     // no cluster reachable yet — sends wait up to 10s each and then fail
+ * }
  * ExampleDrConsumer consumer = new ExampleDrConsumer(dr.getConsumerFactory(), dr.getIdempotencyStore(),
  *         "legacy-order-group", "order-events", "legacy-order-group", new Properties());
  * consumer.start();
@@ -89,6 +94,20 @@ public class KafkaDrRuntime implements AutoCloseable {
 
         // First healthy cluster gets instant election
         healthChecker.start();
+    }
+
+    /**
+     * Waits until a cluster is elected and producers are created on it, so that
+     * {@link DrProducerManager#send} does not have to wait.
+     *
+     * <p>Optional: a send issued before that waits for the election itself (bounded), and
+     * DR consumers return empty polls until a cluster is active.
+     *
+     * @return {@code true} if ready; {@code false} on timeout (e.g. all clusters unreachable),
+     *         after {@link #close()} or on interrupt
+     */
+    public boolean awaitReady(Duration timeout) {
+        return producerManager.awaitActive(timeout.toMillis());
     }
 
     /**

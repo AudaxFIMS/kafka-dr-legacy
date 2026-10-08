@@ -10,6 +10,7 @@ import com.example.kafkadr.idempotency.IdempotencyKeys;
 import com.example.kafkadr.serialization.ContentType;
 import com.example.kafkadr.serialization.MessageSerializer;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
@@ -28,6 +29,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Resilient Kafka producer with error classification and instant failover.
@@ -53,10 +55,22 @@ public class DrProducerManager implements ClusterSwitchListener {
     private final Object switchMonitor = new Object();
     /** Cluster + its producers, swapped atomically on switch. */
     private volatile ProducerSet active = ProducerSet.EMPTY;
+    private volatile boolean stopped = false;
+    private final Function<Properties, Producer<String, Object>> producerCreator;
 
     public DrProducerManager(KafkaDrConfig config, ClusterManager clusterManager) {
+        this(config, clusterManager, KafkaProducer::new);
+    }
+
+    /**
+     * @param producerCreator creates a producer from resolved properties;
+     *                        tests can supply a {@code MockProducer} here
+     */
+    public DrProducerManager(KafkaDrConfig config, ClusterManager clusterManager,
+                             Function<Properties, Producer<String, Object>> producerCreator) {
         this.config = config;
         this.clusterManager = clusterManager;
+        this.producerCreator = producerCreator;
         this.maxRetries = config.getHealthCheck().getFailureThreshold();
         if (config.getProducers() != null) {
             for (DrProducerConfig pc : config.getProducers()) {
@@ -71,7 +85,7 @@ public class DrProducerManager implements ClusterSwitchListener {
                 previousCluster != null ? previousCluster.getName() : "none",
                 newCluster.getName());
         // Create first, then swap, then close — senders never see an empty producer map
-        Map<String, KafkaProducer<String, Object>> created = createAllProducers(newCluster);
+        Map<String, Producer<String, Object>> created = createAllProducers(newCluster);
         ProducerSet old;
         synchronized (switchMonitor) {
             old = active;
@@ -106,6 +120,12 @@ public class DrProducerManager implements ClusterSwitchListener {
                     UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
         }
 
+        // At startup the first election (and producer creation) is asynchronous — give it time
+        // instead of failing sends issued right after KafkaDrRuntime.start()
+        if (!awaitActive(SWITCH_AWAIT_TIMEOUT_MS)) {
+            throw new IllegalStateException("No active cluster available");
+        }
+
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             ProducerSet set = active;
             ClusterInfo cluster = set.cluster;
@@ -113,7 +133,7 @@ public class DrProducerManager implements ClusterSwitchListener {
                 throw new IllegalStateException("No active cluster available");
             }
 
-            KafkaProducer<String, Object> producer = set.producers.get(topic);
+            Producer<String, Object> producer = set.producers.get(topic);
             if (producer == null) {
                 throw new IllegalStateException("No producer for topic: " + topic +
                         ". Active cluster: " + cluster.getName());
@@ -177,11 +197,41 @@ public class DrProducerManager implements ClusterSwitchListener {
         return active.cluster;
     }
 
+    /**
+     * Wait until producers are bound to a cluster. Returns immediately once a cluster is active.
+     *
+     * @return {@code true} if producers are ready; {@code false} on timeout, after {@link #stop()}
+     *         or if the calling thread is interrupted
+     */
+    public boolean awaitActive(long timeoutMs) {
+        if (active.cluster != null) {
+            return true;
+        }
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        synchronized (switchMonitor) {
+            while (active.cluster == null && !stopped) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    return false;
+                }
+                try {
+                    switchMonitor.wait(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            return active.cluster != null;
+        }
+    }
+
     public void stop() {
         ProducerSet old;
         synchronized (switchMonitor) {
+            stopped = true;
             old = active;
             active = ProducerSet.EMPTY;
+            switchMonitor.notifyAll();
         }
         closeProducers(old.producers);
     }
@@ -254,18 +304,18 @@ public class DrProducerManager implements ClusterSwitchListener {
 
     // ─── Producer lifecycle ─────────────────────────────────────
 
-    private Map<String, KafkaProducer<String, Object>> createAllProducers(ClusterInfo cluster) {
-        Map<String, KafkaProducer<String, Object>> created = new HashMap<>();
+    private Map<String, Producer<String, Object>> createAllProducers(ClusterInfo cluster) {
+        Map<String, Producer<String, Object>> created = new HashMap<>();
         for (DrProducerConfig pc : producerConfigs.values()) {
             Properties props = buildProducerProperties(cluster, pc);
-            KafkaProducer<String, Object> producer = new KafkaProducer<>(props);
+            Producer<String, Object> producer = producerCreator.apply(props);
             created.put(pc.getTopic(), producer);
             log.info("Created producer for topic='{}' on cluster '{}'", pc.getTopic(), cluster.getName());
         }
         return created;
     }
 
-    private void closeProducers(Map<String, KafkaProducer<String, Object>> producers) {
+    private void closeProducers(Map<String, Producer<String, Object>> producers) {
         producers.forEach((topic, producer) -> {
             try {
                 producer.flush();
@@ -317,9 +367,9 @@ public class DrProducerManager implements ClusterSwitchListener {
         static final ProducerSet EMPTY = new ProducerSet(null, Map.of());
 
         final ClusterInfo cluster;
-        final Map<String, KafkaProducer<String, Object>> producers;
+        final Map<String, Producer<String, Object>> producers;
 
-        ProducerSet(ClusterInfo cluster, Map<String, KafkaProducer<String, Object>> producers) {
+        ProducerSet(ClusterInfo cluster, Map<String, Producer<String, Object>> producers) {
             this.cluster = cluster;
             this.producers = producers;
         }
