@@ -19,6 +19,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -38,6 +39,7 @@ public class RestServer {
 
     private static final Logger log = LoggerFactory.getLogger(RestServer.class);
     private static final ObjectMapper mapper = new ObjectMapper();
+    private static final Duration PRODUCE_READY_TIMEOUT = Duration.ofSeconds(10);
 
     private final KafkaDrApplication app;
     private HttpServer server;
@@ -120,7 +122,8 @@ public class RestServer {
             return;
         }
 
-        if (app.getClusterManager().getActiveCluster() == null) {
+        // Right after startup the first election may still be running — wait for it
+        if (!app.getRuntime().awaitReady(PRODUCE_READY_TIMEOUT)) {
             sendResponse(exchange, 503, errorJson("No active cluster available"));
             return;
         }
